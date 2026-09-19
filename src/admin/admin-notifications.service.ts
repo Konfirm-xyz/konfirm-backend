@@ -5,7 +5,7 @@ export type NotificationSeverity = 'critical' | 'warning' | 'info';
 
 export interface AdminNotification {
   id: string;
-  type: 'x402_settlement' | 'payment' | 'withdrawal' | 'compliance';
+  type: 'x402_settlement' | 'payment' | 'withdrawal' | 'compliance' | 'attestation';
   severity: NotificationSeverity;
   message: string;
   created_at: string;
@@ -55,6 +55,20 @@ export class AdminNotificationsService {
                   || COALESCE(' (' || reason || ')', '') AS message,
                 created_at
          FROM blocked_addresses
+       )
+       UNION ALL
+       (
+         -- Sweeps every 2 minutes (PaymentAttestationSweeperService); a row
+         -- still unattested 10 minutes after the payment itself landed
+         -- means at least several attempts have already failed, not just
+         -- normal cron lag -- the exact silent-failure shape the September
+         -- outage taught this project to surface rather than let sit
+         -- unnoticed with Sentry unconfigured.
+         SELECT id, 'attestation' AS type, 'warning' AS severity,
+                'On-chain attestation still pending for payment ' || LEFT(id::text, 8) || '…' AS message,
+                created_at
+         FROM payments
+         WHERE status = 'paid' AND attested_at IS NULL AND created_at < NOW() - INTERVAL '10 minutes'
        )
        ORDER BY created_at DESC
        LIMIT $1`,

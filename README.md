@@ -2,7 +2,7 @@
 
 The API and settlement-watching service behind **Konfirm**, a non-custodial payment processor built on Stellar. This repo is a pure JSON API: the NestJS app, the Postgres schema, and a Rust reconciler that watches the chain and turns confirmed transactions into records — nothing here ever holds a merchant's or payer's private key, and nothing here serves a page.
 
-Sibling repos: [konfirm-contracts](https://github.com/konfirm-HQ/konfirm-contracts) (Soroban contracts, not yet wired into this API's runtime path) and [konfirm-frontend](https://github.com/konfirm-HQ/konfirm-frontend) (the Next.js app that calls this API — the only place the frontend lives; it proxies to whatever `BACKEND_URL` points at rather than being served from here).
+Sibling repos: [konfirm-contracts](https://github.com/konfirm-HQ/konfirm-contracts) (Soroban contracts — `compliance` and `payment` are both wired into this API's runtime path today; `treasury` and `channel` are deployed but not part of the checkout flow, see [Payment attestation](#payment-attestation) below) and [konfirm-frontend](https://github.com/konfirm-HQ/konfirm-frontend) (the Next.js app that calls this API — the only place the frontend lives; it proxies to whatever `BACKEND_URL` points at rather than being served from here).
 
 ## How it works
 
@@ -363,6 +363,43 @@ before the money moves:
 Verified for real: a locally-blocked test payer's payment landed as `held` immediately; a normal
 payer's landed as `paid` immediately, with the background check confirmed to run (via logs) and not
 flip a clean payment's status. Not simulated — both against real signed testnet transactions.
+
+## Payment attestation
+
+The deployed-but-previously-unused `payment` contract (`CCYRA6JT2L4NS5FG4B5TP52JPCGCPYSP7M6LUDUY2QA37V5UBXWJBRHV`) is
+now wired into checkout as a pure attestation layer — matching its own doc comment: "an attestation
+layer, not an escrow." It never moves funds and never gates a payment; `record_payment` is called
+*after* the reconciler has already recorded a payment as `paid`, writing an on-chain mirror of
+something that already fully settled to the merchant. `treasury`'s multisig settlement, by contrast,
+is deliberately **not** wired into checkout — there is no existing payout step for it to sit next to
+(a classic Stellar payment already lands directly in the merchant's own account), so doing that would
+mean introducing real custody where none exists today. That's an intentional scope decision, not an
+oversight; see the GitHub issue history on `konfirm-backend`#1 for the reasoning.
+
+`PaymentAttestationSweeperService` (`src/payments/payment-attestation-sweeper.service.ts`) is an
+in-process `@Cron('*/2 * * * *')` task — the fourth instance of this exact architecture in this codebase
+(`ChannelKeeperService`, `FacilitatorSweepService`, the referral-rewards cron) — that sweeps
+`payments WHERE status = 'paid' AND attested_at IS NULL`, calls `PaymentAttestationService.attest()`
+per row (the real `Client`/`AssembledTransaction`/`signAndSend()` submission pattern, not the
+lower-level `TransactionBuilder` pattern `channel.service.ts` uses — see that file's own doc comment
+for why: `record_payment` requires the facilitator to authorize itself via `require_auth()`, the first
+call in this codebase to need that, and only the high-level API collects and signs the resulting auth
+entry correctly), and writes back `onchain_payment_id`/`attested_at` on real on-chain confirmation. Its
+own `pg_try_advisory_lock` key (`402_003`) guards against double-sweeping across replicas, same as the
+other three sweepers.
+
+Verified for real, end to end: a real classic USDC payment (merchant landed on a fresh throwaway
+address, no shortcuts), recorded by the reconciler as usual, picked up by a live `@Cron()` tick
+(not simulated), and independently confirmed against the deployed contract's own `get_payment` — every
+field (`amount`, `link_id`, `merchant`, `payer`, `tx_hash`) matched the local Postgres row exactly.
+
+**A real dependency on the facilitator-key hardening work worth knowing about**: this feature's
+self-authorization only works today because the currently-active raw-key signer
+(`createEd25519Signer` from `@x402/stellar`) has a real `signAuthEntry` implementation
+(`basicNodeSigner` under the hood). The KMS-backed signer (`src/common/kms-ed25519-signer.ts`) has
+`signAuthEntry` as a documented, intentional throw — "no live call site... yet." This feature is now
+that live call site, so the KMS cutover (still blocked on real AWS KMS key provisioning) cannot ship
+until `signAuthEntry` is actually implemented there too.
 
 ## Incidents
 
