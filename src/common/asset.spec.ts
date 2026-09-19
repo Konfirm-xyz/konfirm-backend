@@ -1,5 +1,5 @@
 import { BadRequestException } from '@nestjs/common';
-import { resolveAsset, USDC_TESTNET_ISSUER } from './asset';
+import { resolveAsset, EURC_TESTNET_ISSUER, USDC_TESTNET_ISSUER } from './asset';
 
 describe('resolveAsset', () => {
   it('resolves XLM to the native asset', () => {
@@ -14,8 +14,11 @@ describe('resolveAsset', () => {
     expect(asset.getIssuer()).toBe(USDC_TESTNET_ISSUER);
   });
 
-  it('rejects a currency with no wired-up asset (e.g. EURC, accepted by validation but not implemented)', () => {
-    expect(() => resolveAsset('EURC')).toThrow(BadRequestException);
+  it('resolves EURC to the real testnet issuer, not a placeholder', () => {
+    const asset = resolveAsset('EURC');
+    expect(asset.isNative()).toBe(false);
+    expect(asset.getCode()).toBe('EURC');
+    expect(asset.getIssuer()).toBe(EURC_TESTNET_ISSUER);
   });
 
   it('rejects garbage input rather than defaulting to something plausible-looking', () => {

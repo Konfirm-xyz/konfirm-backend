@@ -375,7 +375,7 @@ one, not a generic template.
 ## Known limitations
 
 - **Testnet only.** Mainnet needs a funded production USDC issuer, `JWT_SECRET` in a real secrets manager, and HTTPS in front of the session cookie.
-- **XLM and USDC only.** `EURC` is accepted by validation but not implemented in `prepareTx` or `buildPayUri`.
+- **XLM, USDC, and EURC.** All three resolve through `resolveAsset()` and get real fee/net USD math via the reconciler's live order-book conversion (see `reconciler/src/horizon.rs`'s `xlm_usdc_rate`/`eurc_usdc_rate`) — no other currency is wired up.
 - **SEP-7/QR compliance screening is after-the-fact, not preventive** — by the time the reconciler can check it, the payment has already landed on-chain. See [Compliance](#compliance) for the full design; this is an architectural ceiling of the SEP-7 flow itself, not something a code change on Konfirm's side can move earlier.
 - **The reconciler watches one merchant address per process.** Fine for a pilot; a real deployment needs either one process per merchant or a multi-account watch loop.
 - Fails open, loudly, if the compliance contract is unreachable (logged, never silent) — a deliberate choice, not an oversight.

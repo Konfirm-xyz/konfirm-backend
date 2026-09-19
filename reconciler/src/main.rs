@@ -17,6 +17,12 @@ const HORIZON_TESTNET: &str = "https://horizon-testnet.stellar.org";
 // changes, both places need updating together.
 const USDC_TESTNET_ISSUER: &str = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
 
+// Must match konfirm-backend's src/common/asset.ts EURC_TESTNET_ISSUER —
+// Circle's official testnet EURC issuer (developers.circle.com/stablecoins/
+// eurc-contract-addresses), confirmed live against Horizon's /assets
+// endpoint before use, same as USDC's issuer above.
+const EURC_TESTNET_ISSUER: &str = "GB3Q6QDZYTHWT7E5PVS3W7FUT5GVAFC5KSZFFLPU25GO7VTC3NM2ZTVO";
+
 fn database_url() -> String {
     std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres:///konfirm_dev".to_string())
@@ -94,10 +100,12 @@ async fn watch(merchant_address: &str, max_polls: u32, interval_secs: u64) -> Re
         tracing::info!(poll_num, cursor, "polling horizon");
         let ops = horizon.payments_since(merchant_address, &cursor, 50).await?;
 
-        // Fetched at most once per poll, lazily, only if this batch
-        // actually contains an XLM payment — most batches won't, and the
-        // rate doesn't meaningfully change within one poll interval anyway.
+        // Fetched at most once per poll per currency, lazily, only if this
+        // batch actually contains a payment in that currency — most
+        // batches won't, and the rate doesn't meaningfully change within
+        // one poll interval anyway.
         let mut xlm_usdc_rate: Option<rust_decimal::Decimal> = None;
+        let mut eurc_usdc_rate: Option<rust_decimal::Decimal> = None;
 
         for op in &ops {
             if op.op_type != "payment" {
@@ -157,6 +165,15 @@ async fn watch(merchant_address: &str, max_polls: u32, interval_secs: u64) -> Re
                     None => {
                         let r = horizon.xlm_usdc_rate(USDC_TESTNET_ISSUER).await?;
                         xlm_usdc_rate = Some(r);
+                        r
+                    }
+                })
+            } else if asset_code == "EURC" {
+                Some(match eurc_usdc_rate {
+                    Some(r) => r,
+                    None => {
+                        let r = horizon.eurc_usdc_rate(EURC_TESTNET_ISSUER, USDC_TESTNET_ISSUER).await?;
+                        eurc_usdc_rate = Some(r);
                         r
                     }
                 })

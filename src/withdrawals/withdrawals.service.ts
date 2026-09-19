@@ -71,6 +71,13 @@ export class WithdrawalsService {
   // first attempt actually landed and only the response was lost in
   // transit, blindly retrying would leave an orphaned duplicate transaction
   // behind — a timeout still fails fast, it just doesn't self-heal.
+  // EURC resolves fine through resolveAsset() below (checkout's link
+  // currency and this cash-out currency happen to share that helper), but
+  // testanchor.stellar.org's own SEP-24 /info only lists `native`/USDC/SRT
+  // as withdrawable assets (confirmed live) — the cashout page's currency
+  // toggle deliberately stays XLM/USDC-only rather than offering a EURC
+  // option that would fail at the anchor, not because of a gap on this
+  // side.
   async startWithdrawal(token: string, currency: string, account: string) {
     const assetCode = currency === 'XLM' ? 'native' : currency;
     // The spec (SEP-24) allows form-encoded, multipart, or JSON bodies here

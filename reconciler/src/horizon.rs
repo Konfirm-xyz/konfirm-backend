@@ -154,9 +154,29 @@ impl HorizonClient {
     /// makes that gap immaterial for accounting purposes; it would matter
     /// for anything latency-sensitive like arbitrage, which this isn't.
     pub async fn xlm_usdc_rate(&self, usdc_issuer: &str) -> Result<Decimal> {
+        self.order_book_usdc_rate("selling_asset_type=native", usdc_issuer, "XLM")
+            .await
+    }
+
+    /// Same reasoning and same "current-moment mid, not point-in-time" caveat
+    /// as xlm_usdc_rate — EURC is a real, live checkout currency
+    /// (`links.currency`'s own CHECK constraint already allowed it before
+    /// this had an actual conversion), and EUR/USD moves enough (a few
+    /// percent a year, sometimes more) that treating it as 1:1 would repeat
+    /// exactly the silent-wrong-dollar-figure bug already found and fixed
+    /// for XLM.
+    pub async fn eurc_usdc_rate(&self, eurc_issuer: &str, usdc_issuer: &str) -> Result<Decimal> {
+        let selling = format!(
+            "selling_asset_type=credit_alphanum4&selling_asset_code=EURC&selling_asset_issuer={}",
+            eurc_issuer
+        );
+        self.order_book_usdc_rate(&selling, usdc_issuer, "EURC").await
+    }
+
+    async fn order_book_usdc_rate(&self, selling_query: &str, usdc_issuer: &str, label: &str) -> Result<Decimal> {
         let url = format!(
-            "{}/order_book?selling_asset_type=native&buying_asset_type=credit_alphanum4&buying_asset_code=USDC&buying_asset_issuer={}",
-            self.base_url, usdc_issuer
+            "{}/order_book?{}&buying_asset_type=credit_alphanum4&buying_asset_code=USDC&buying_asset_issuer={}",
+            self.base_url, selling_query, usdc_issuer
         );
         let resp = self
             .get_with_retry(&url)
@@ -174,7 +194,7 @@ impl HorizonClient {
             (Some(bid), Some(ask)) => Ok((bid + ask) / Decimal::from(2)),
             (Some(bid), None) => Ok(bid),
             (None, Some(ask)) => Ok(ask),
-            (None, None) => anyhow::bail!("XLM/USDC order book is empty on both sides — no rate available"),
+            (None, None) => anyhow::bail!("{label}/USDC order book is empty on both sides — no rate available"),
         }
     }
 }
@@ -195,6 +215,7 @@ mod test {
     use super::*;
 
     const USDC_TESTNET_ISSUER: &str = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
+    const EURC_TESTNET_ISSUER: &str = "GB3Q6QDZYTHWT7E5PVS3W7FUT5GVAFC5KSZFFLPU25GO7VTC3NM2ZTVO";
 
     // Against the real, live testnet order book, not a mock — confirmed
     // manually first (curl'd the same endpoint, saw a real non-empty book,
@@ -213,5 +234,21 @@ mod test {
             .expect("live testnet order_book request should succeed");
         assert!(rate > Decimal::from(0), "rate should be positive, got {rate}");
         assert!(rate < Decimal::from(1000), "rate should be well under $1000/XLM, got {rate}");
+    }
+
+    // Same real-live-book standard as the XLM test above — confirmed
+    // manually first (curl'd the same endpoint, saw a real one-sided book,
+    // best ask 1.16 at the time this was written; testnet EURC/USDC
+    // liquidity is thin, hence the wide bound below rather than a tight
+    // EUR/USD-realistic one).
+    #[tokio::test]
+    async fn eurc_usdc_rate_returns_a_real_positive_rate_from_live_testnet() {
+        let client = HorizonClient::new("https://horizon-testnet.stellar.org");
+        let rate = client
+            .eurc_usdc_rate(EURC_TESTNET_ISSUER, USDC_TESTNET_ISSUER)
+            .await
+            .expect("live testnet order_book request should succeed");
+        assert!(rate > Decimal::from(0), "rate should be positive, got {rate}");
+        assert!(rate < Decimal::from(10), "rate should be well under $10/EURC, got {rate}");
     }
 }
