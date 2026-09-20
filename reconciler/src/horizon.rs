@@ -116,6 +116,27 @@ impl HorizonClient {
         Ok(resp.embedded.records)
     }
 
+    /// Fetches every operation in a single transaction, to find the
+    /// sibling fee-collection leg of an already-matched checkout payment —
+    /// the two legs share a transaction (submitted atomically, one payer
+    /// signature) but the fee leg never touches the merchant's own
+    /// address, so it never appears in payments_since's per-account feed
+    /// at all. Reuses PaymentOp/PaymentsResponse since /operations returns
+    /// the same record shape as /accounts/{id}/payments.
+    pub async fn operations_for_transaction(&self, tx_hash: &str) -> Result<Vec<PaymentOp>> {
+        let url = format!("{}/transactions/{}/operations?join=transactions", self.base_url, tx_hash);
+        let resp = self
+            .get_with_retry(&url)
+            .await
+            .context("horizon operations-for-transaction request failed")?
+            .error_for_status()
+            .context("horizon returned an error status for operations-for-transaction")?
+            .json::<PaymentsResponse>()
+            .await
+            .context("failed to parse horizon operations-for-transaction response")?;
+        Ok(resp.embedded.records)
+    }
+
     /// Resolves the special 'now' cursor to the account's current latest
     /// paging_token, so the reconciler only ever sees payments that land
     /// *after* it started — never from an arbitrary hardcoded value, and
@@ -250,5 +271,24 @@ mod test {
             .expect("live testnet order_book request should succeed");
         assert!(rate > Decimal::from(0), "rate should be positive, got {rate}");
         assert!(rate < Decimal::from(10), "rate should be well under $10/EURC, got {rate}");
+    }
+
+    // A real, permanent testnet transaction — a fee-split checkout
+    // transaction built by prepareTx and submitted for real during this
+    // feature's own end-to-end verification (2 payment ops: 5 XLM to the
+    // merchant, 0.005 XLM to the platform fee address). Testnet
+    // transactions don't expire, so this is a stable fixture, same
+    // reasoning as the channel netting engine's onchain_channel_id=1.
+    #[tokio::test]
+    async fn operations_for_transaction_returns_both_legs_of_a_real_fee_split_payment() {
+        let client = HorizonClient::new("https://horizon-testnet.stellar.org");
+        let ops = client
+            .operations_for_transaction("0a8147370ed3b44ee86af0cd4e048b2d7c763b5911dd63039ee13fd5c207a7d2")
+            .await
+            .expect("live testnet operations request should succeed");
+        assert_eq!(ops.len(), 2);
+        assert_eq!(ops[0].amount.as_deref(), Some("5.0000000"));
+        assert_eq!(ops[1].amount.as_deref(), Some("0.0050000"));
+        assert_eq!(ops[1].to.as_deref(), Some("GBJG2IGPXJ673TMTQMMJCSMITNSLVTIJ62MRSHCTQTTGNLV75TFR5PHY"));
     }
 }

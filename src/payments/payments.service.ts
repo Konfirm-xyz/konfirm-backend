@@ -4,6 +4,12 @@ import { pool } from '../db/pool';
 import { resolveAsset } from '../common/asset';
 import { withRetry } from '../common/retry';
 import { isAllowedOnChain } from '../common/onchain-compliance';
+import { getEffectiveFeeBps } from '../common/effective-fee';
+import { platformFeeAddress } from '../common/platform-fee';
+
+// Matches NUMERIC(18,7) — the same precision links.amount_usdc/payments
+// columns already use.
+const ASSET_DECIMALS = 7;
 
 const HORIZON_URL = 'https://horizon-testnet.stellar.org';
 
@@ -28,7 +34,7 @@ export class PaymentsService {
   // rules can't drift between them.
   private async loadPayableLink(linkId: string) {
     const linkRes = await pool.query(
-      `SELECT l.id, l.amount_usdc, l.currency, l.active, l.expires_at, m.stellar_base_address, m.status AS merchant_status
+      `SELECT l.id, l.amount_usdc, l.currency, l.active, l.expires_at, m.id AS merchant_id, m.stellar_base_address, m.status AS merchant_status
        FROM links l JOIN merchants m ON m.id = l.merchant_id
        WHERE l.id = $1`,
       [linkId],
@@ -75,10 +81,24 @@ export class PaymentsService {
     const destination = link.stellar_base_address;
     const asset = resolveAsset(link.currency);
 
+    // Additive fee: the merchant still nets exactly link.amount_usdc,
+    // unchanged from before this feature existed — the payer pays that
+    // plus this fee, as a second operation below, not a cut taken from the
+    // merchant's own leg. Run alongside the Horizon account load below
+    // (independent calls, one Postgres, one network) rather than after it
+    // — this endpoint already does two real network round trips
+    // (compliance + Horizon) in sequence, and stacking a third serially
+    // measurably added to real end-to-end latency under load.
+    const feeBpsPromise = getEffectiveFeeBps(link.merchant_id);
+
     // A read, safe to retry — unlike a POST that creates state on an
     // external service, asking Horizon for account details twice has no
     // side effect if the first attempt actually landed.
-    const payerAccount = await withRetry(() => this.horizon.loadAccount(payerAddress), { retries: 2, timeoutMs: 8_000 });
+    const [payerAccount, feeBps] = await Promise.all([
+      withRetry(() => this.horizon.loadAccount(payerAddress), { retries: 2, timeoutMs: 8_000 }),
+      feeBpsPromise,
+    ]);
+    const feeAmount = (Number(link.amount_usdc) * feeBps) / 10_000;
     const builder = new TransactionBuilder(payerAccount, {
       fee: BASE_FEE,
       networkPassphrase: Networks.TESTNET,
@@ -88,7 +108,9 @@ export class PaymentsService {
     // non-native asset — a payer's first-ever USDC payment would otherwise
     // fail on-chain with op_no_trust. Bundling ChangeTrust into the same
     // transaction as the Payment keeps this a single sign-and-send instead
-    // of a separate setup step the payer has to know to do first.
+    // of a separate setup step the payer has to know to do first. Both
+    // operations below move the same asset, so this one trustline covers
+    // both legs.
     if (!asset.isNative()) {
       const balances = payerAccount.balances as Array<{ asset_code?: string; asset_issuer?: string }>;
       const hasTrustline = balances.some(
@@ -99,17 +121,29 @@ export class PaymentsService {
       }
     }
 
-    const tx = builder
-      .addOperation(
+    builder.addOperation(
+      Operation.payment({
+        destination,
+        asset,
+        amount: link.amount_usdc.toString(),
+      }),
+    );
+
+    // Skipped entirely at 0 (e.g. a fully-promo'd merchant) — no wasted
+    // operation, and no assumption that the platform fee account even
+    // needs a trustline for an asset that will never actually reach it for
+    // this merchant.
+    if (feeAmount > 0) {
+      builder.addOperation(
         Operation.payment({
-          destination,
+          destination: platformFeeAddress(),
           asset,
-          amount: link.amount_usdc.toString(),
+          amount: feeAmount.toFixed(ASSET_DECIMALS),
         }),
-      )
-      .addMemo(Memo.id(muxedId))
-      .setTimeout(60)
-      .build();
+      );
+    }
+
+    const tx = builder.addMemo(Memo.id(muxedId)).setTimeout(60).build();
 
     return {
       xdr: tx.toXDR(),

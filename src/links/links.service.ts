@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { pool } from '../db/pool';
+import { getEffectiveFeeBps } from '../common/effective-fee';
 
 export interface CreateLinkInput {
   merchant_id: string;
@@ -33,12 +34,25 @@ export class LinksService {
   async getPublic(id: string) {
     const { rows } = await pool.query(
       `SELECT l.id, l.amount_usdc, l.currency, l.description, l.active, l.expires_at,
-              m.name AS merchant_name, m.stellar_base_address
+              m.id AS merchant_id, m.name AS merchant_name, m.stellar_base_address
        FROM links l JOIN merchants m ON m.id = l.merchant_id
        WHERE l.id = $1`,
       [id],
     );
     if (rows.length === 0) throw new NotFoundException('link not found');
-    return rows[0];
+    const link = rows[0];
+
+    // Lets the checkout page preview the real total (amount + fee) before
+    // the payer connects a wallet, and decide whether to offer the SEP-7
+    // QR option at all — see prepareTx/buildPayUri in payments.service.ts
+    // for why QR can't carry this fee.
+    if (link.amount_usdc) {
+      const feeBps = await getEffectiveFeeBps(link.merchant_id);
+      link.fee_usdc = ((Number(link.amount_usdc) * feeBps) / 10_000).toFixed(7);
+    } else {
+      link.fee_usdc = null;
+    }
+    delete link.merchant_id;
+    return link;
   }
 }

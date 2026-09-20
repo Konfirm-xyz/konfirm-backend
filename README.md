@@ -49,6 +49,7 @@ node -e "console.log(require('crypto').randomBytes(48).toString('base64'))"
 | `PORT` | No | Defaults to `3001` |
 | `SENTRY_DSN` | No | Enables error tracking (see Logging & error tracking below); a no-op without it |
 | `NODE_ENV` | No | Set to `production` for real JSON log lines instead of the pretty dev formatter |
+| `PLATFORM_FEE_ADDRESS` | Recommended | A dedicated Stellar account (see `scripts/setup-fee-collection-account.mjs`) that receives Konfirm's checkout fee as a second payment operation in the same transaction as the merchant's. Unset means checkout skips fee collection entirely rather than failing — see [Fees](#fees) below. |
 
 Create the database and apply migrations:
 

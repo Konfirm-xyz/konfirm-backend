@@ -78,10 +78,12 @@ describe('critical path: signup -> link -> session -> prepare-tx (e2e)', () => {
     linkId = res.body.id;
   });
 
-  it('serves the public projection a checkout page relies on', async () => {
+  it('serves the public projection a checkout page relies on, including the real fee preview', async () => {
     const res = await request(app.getHttpServer()).get(`/links/${linkId}/public`).expect(200);
     expect(res.body.stellar_base_address).toBe(stellarAddress);
     expect(res.body.amount_usdc).toBe('5.0000000');
+    // Default merchant fee_bps is 10 (0.1%, migration 001) — 5.00 * 10 / 10000.
+    expect(res.body.fee_usdc).toBe('0.0050000');
   });
 
   it('reserves a session against the link', async () => {
@@ -98,7 +100,7 @@ describe('critical path: signup -> link -> session -> prepare-tx (e2e)', () => {
       .expect(409);
   });
 
-  it('prepares a real, well-formed transaction for the payer to sign', async () => {
+  it('prepares a real, well-formed transaction for the payer to sign, splitting merchant + fee legs', async () => {
     const res = await request(app.getHttpServer())
       .get('/payments/prepare-tx')
       .query({ linkId, muxed_id: '123456789', payer: payerAddress })
@@ -111,10 +113,17 @@ describe('critical path: signup -> link -> session -> prepare-tx (e2e)', () => {
     // exactly the kind of check that would have caught the muxed-address
     // vs. memo routing bug earlier in this project's life, automatically,
     // on every run, instead of needing a human to notice a wallet crash.
+    // Two operations, not one: additive fee collection means the payer's
+    // single signed transaction pays the merchant the full link amount AND
+    // Konfirm's fee, atomically — see payments.service.ts's prepareTx.
     const tx = TransactionBuilder.fromXDR(res.body.xdr, Networks.TESTNET) as Transaction;
-    expect(tx.operations).toHaveLength(1);
+    expect(tx.operations).toHaveLength(2);
     expect(tx.operations[0].type).toBe('payment');
     expect((tx.operations[0] as any).destination).toBe(stellarAddress);
+    expect((tx.operations[0] as any).amount).toBe('5.0000000');
+    expect(tx.operations[1].type).toBe('payment');
+    expect((tx.operations[1] as any).destination).toBe(process.env.PLATFORM_FEE_ADDRESS);
+    expect((tx.operations[1] as any).amount).toBe('0.0050000');
     expect(tx.memo.type).toBe('id');
     expect(tx.memo.value).toBe('123456789');
   });
