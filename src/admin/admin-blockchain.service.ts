@@ -15,7 +15,10 @@ const FACILITATOR_ADDRESS = 'GAEMG5TVLEIQYCY3XB4EJT742DIE3FQO53RSESSYJQUZIWZOJQI
 const CONTRACTS = [
   { name: 'Compliance', id: 'CDDVLE2DZQAYFY3Z2Z74TUNNPC4ROUACSBXOB2P64IT75EZFAQXSRSXY' },
   { name: 'Payment', id: 'CCYRA6JT2L4NS5FG4B5TP52JPCGCPYSP7M6LUDUY2QA37V5UBXWJBRHV' },
-  { name: 'Treasury', id: 'CDUGB6KXOEHYVEDCC673CVW33I3FXBPE5EPHXNYOVBLAAXTWZG6SFESZ' },
+  // Redeployed when execute_settlement was fixed to actually transfer funds
+  // (konfirm-contracts d55d546/7a4b664) — the old address here was stale,
+  // pointing at the pre-fix instance.
+  { name: 'Treasury', id: 'CD77HPVBGIRYQGXC4JVCEO35X6FKFFJ2C4EZ63EQCOXGR6OL4TVEPZ2T' },
   { name: 'Channel', id: 'CDS2Y4CQMQWFLCG5GHVKX7UIXHYPM6IJDJZTEXSASSHGHLESGLGLNPL6' },
 ];
 
