@@ -45,7 +45,13 @@ node -e "console.log(require('crypto').randomBytes(48).toString('base64'))"
 | Variable | Required | Notes |
 |---|---|---|
 | `DATABASE_URL` | Yes | e.g. `postgres://you@localhost:5432/konfirm_dev` |
-| `JWT_SECRET` | Recommended | Falls back to an insecure dev default with a console warning if unset — fine for localhost, never beyond it |
+| `JWT_SECRET` | Yes in production | Must be set, at least 32 characters, and different from `ADMIN_JWT_SECRET`. Outside production, an unset value falls back to a dev default with a warning. In production the process refuses to start rather than sign sessions with a guessable key (`src/common/secrets.ts`) |
+| `ADMIN_JWT_SECRET` | Yes in production | Same rules as `JWT_SECRET`, and must differ from it |
+| `APP_URL` | Yes in production | Public frontend origin, used to build password-reset links |
+| `MAIL_WEBHOOK_URL` | Yes in production | Relay that receives `{ to, subject, text }` as JSON for transactional email. Without it, production logs `NOT SENT` and no reset email goes out (`src/mail/mailer.ts`) |
+| `MAIL_WEBHOOK_TOKEN` | No | Sent as a Bearer token to `MAIL_WEBHOOK_URL` when set |
+| `TRUST_PROXY_HOPS` | No | Reverse-proxy hops in front of the API. Defaults to `1` in production (Railway's edge). Rate limits key on the client address, so this must match the real chain. Too high lets clients forge `X-Forwarded-For` |
+| `ENABLE_TESTNET_FAUCET` | No | Set to exactly `true` to open the `/deposits` testnet faucet. Off by default, so production answers those routes with 404 |
 | `PORT` | No | Defaults to `3001` |
 | `SENTRY_DSN` | No | Enables error tracking (see Logging & error tracking below); a no-op without it |
 | `NODE_ENV` | No | Set to `production` for real JSON log lines instead of the pretty dev formatter |
@@ -109,8 +115,9 @@ All endpoints are JSON unless noted. Routes marked 🔒 require a valid `konfirm
 |---|---|---|---|
 | `GET` | `/payments/prepare-tx` | `linkId, muxed_id, payer` | Builds an unsigned Freighter transaction; runs compliance screening first; bundles a `ChangeTrust` op automatically if the payer has no USDC trustline yet |
 | `GET` | `/payments/pay-uri` | `linkId, muxed_id` | Returns a `web+stellar:pay` SEP-7 URI for QR/mobile-wallet checkout — no payer address needed or knowable at this point |
-| `GET` | `/payments/by-merchant/:stellarAddress` | — | Confirmed payments for this address, newest first |
-| `GET` | `/payments/pending-by-merchant/:stellarAddress` | — | Whether a session was reserved but hasn't landed yet (drives the "waiting" UI state) |
+| `GET` | `/payments/mine` 🔒 | — | The logged-in merchant's payments, newest first, with `status` and `flag_reason` (held payments are listed, but only `paid` counts toward totals) |
+| `GET` | `/payments/mine/pending` 🔒 | — | Whether a session was reserved but hasn't landed yet (drives the "waiting" UI state) |
+| `GET` | `/links/:linkId/sessions/:muxedId` | — | The payer's own session only: `{ confirmed, payment }`, where `payment` carries amount, asset, and tx hash. The checkout page polls this. The random `muxedId` is the capability, so nothing about other payments is exposed |
 
 ### Withdrawals (fiat off-ramp)
 
@@ -124,7 +131,7 @@ All endpoints are JSON unless noted. Routes marked 🔒 require a valid `konfirm
 
 ### Admin
 
-Routes marked 🔐 require a valid `konfirm_admin_session` cookie — a completely separate identity from a merchant's `konfirm_session` (see [Admin auth](#admin-auth) below).
+This table lists every route in `src/admin/admin.controller.ts`, and every route there sits behind `AdminGuard`. Routes marked 🔐 require a valid `konfirm_admin_session` cookie — a completely separate identity from a merchant's `konfirm_session` (see [Admin auth](#admin-auth) below).
 
 | Method | Path | Body | Notes |
 |---|---|---|---|
@@ -142,6 +149,24 @@ Routes marked 🔐 require a valid `konfirm_admin_session` cookie — a complete
 | `GET` | `/admin/reconciler/status` 🔐 | — | The reconciler's current Horizon cursor + when it last moved |
 | `POST` | `/admin/reconciler/rewind` 🔐 | `cursor` | **Backward-only** — see below |
 | `GET` | `/admin/withdrawal-attempts` 🔐 | — | Merchant cash-outs Konfirm has observed being started, with the anchor's last known status |
+| `POST` | `/admin/merchants/:id/password-reset` 🔐 | `reason` (required) | Emails the merchant a reset link. Only for an active account. Logged as `merchant.password-reset-sent`. Admins never see or set the password |
+| `PATCH` | `/admin/merchants/:id/tier` 🔐 | `risk_tier`, `reason?` | Sets the merchant's risk tier |
+| `GET` | `/admin/links` 🔐 | — | Payment links across every merchant |
+| `GET` | `/admin/blockchain/status` 🔐 | — | Deployed contract addresses and their live status |
+| `GET` | `/admin/notifications` 🔐 | — | Events derived live from existing rows: x402 settlements, disputed payments, stuck withdrawals, blocks. Nothing is stored separately |
+| `GET` | `/admin/treasury/status` 🔐 | — | Treasury contract state and balances |
+| `GET` | `/admin/fee-revenue/summary` 🔐 | — | Fee revenue totals from confirmed payments |
+| `GET` | `/admin/fee-revenue/daily` 🔐 | — | Daily fee revenue series |
+| `GET` | `/admin/users` 🔐 | — | Every payer address, with payment count and volume across all statuses |
+| `GET` | `/admin/wallets` 🔐 | — | Every address in the system with its roles (merchant, payer, blocked), in one directory |
+| `GET` | `/admin/exchange-rate/live` 🔐 | — | Current XLM and EURC to USD rates used for fee math |
+| `GET` | `/admin/exchange-rate/conversions` 🔐 | — | Rates applied to individual payments |
+| `GET` | `/admin/referrals` 🔐 | — | Referral attributions and reward status |
+| `GET` | `/admin/bazaar-listings` 🔐 | — | x402 Bazaar submissions awaiting review |
+| `PATCH` | `/admin/bazaar-listings/:id/status` 🔐 | `status: 'approved'\|'rejected'` | Approves or rejects a Bazaar listing. Only approved listings reach the public manifest |
+| `GET` | `/admin/facilitator/status` 🔐 | — | Facilitator spend-guard state: today's spend against the cap, and whether signing is halted |
+| `POST` | `/admin/facilitator/resume` 🔐 | `reason?` | Resumes signing after a halt. Deliberately manual |
+| `GET` | `/admin/x402-settlements` 🔐 | — | x402 single-shot settlements |
 | `GET` | `/admin/activity` 🔐 | — | Recent admin actions, newest first (`?limit`) — every mutation above logs here |
 
 This was originally split into two delivery slices — identity plus merchant management shipped first, alone, before the rest — deliberately, so the newest and highest-privilege part of the system (a second, separate login) got proven in real use before more was built on top of it. Both slices are now built.
@@ -154,7 +179,9 @@ This was originally split into two delivery slices — identity plus merchant ma
 
 ## Auth
 
-Sessions are an httpOnly JWT cookie (`konfirm_session`, 30-day expiry, `SameSite=Lax`). Passwords are bcrypt-hashed. `AuthGuard` attaches `req.merchant` (id, email, name, `stellar_base_address`) to any route behind it — controllers derive identity from this, never from a client-supplied field.
+Sessions are an httpOnly JWT cookie (`konfirm_session`, 30-day expiry, `SameSite=Lax`). Passwords are bcrypt-hashed, and bcrypt only reads the first 72 bytes, so longer passwords are rejected at signup and reset.
+
+**Account recovery.** `POST /auth/forgot-password` always returns `{ ok: true }`, whether or not the email has an account, so it can't be used to check registrations. A real account gets an emailed link that is valid for 30 minutes and works once. Only a SHA-256 of the token is stored. A new request invalidates older links. `POST /auth/reset-password` bumps the merchant's `session_version`, which signs out every existing session, including any a thief holds. Emails are stored and matched in lowercase. Login runs bcrypt even for unknown emails, so timing doesn't reveal which accounts exist. `AuthGuard` attaches `req.merchant` (id, email, name, `stellar_base_address`) to any route behind it — controllers derive identity from this, never from a client-supplied field.
 
 A suspended merchant is rejected in two places, not one: `login()` rejects it outright, and `AuthGuard` re-checks `merchants.status` on every authenticated request (one extra indexed lookup) so an **already-issued** session cookie stops working the instant an admin suspends the account — not just on the merchant's next login. `payments.service.ts`'s `loadPayableLink()` checks the same column, so a suspended merchant's payment links stop accepting money too, not only their own dashboard access.
 
@@ -365,6 +392,35 @@ Verified for real: a locally-blocked test payer's payment landed as `held` immed
 payer's landed as `paid` immediately, with the background check confirmed to run (via logs) and not
 flip a clean payment's status. Not simulated — both against real signed testnet transactions.
 
+## Open decisions
+
+Seven decisions are still open (pricing, cash-out fee, deployer admin, per-asset treasury, pay-what-you-want, mainnet, comment style). Each has a build spec with options, a recommendation, and acceptance criteria in [docs/specs/](docs/specs/README.md). The target design they fit into is in [docs/architecture/target-architecture.md](docs/architecture/target-architecture.md).
+
+## Platform fees
+
+Fees are recorded per payment in `payments.fee_status`:
+
+- `collected`: the fee was a second operation in the payer's transaction (Freighter checkout).
+- `owed`: the payer paid the link amount only (QR and mobile wallets). The merchant owes the fee, in the payment's own asset, rounded down to a stroop.
+- `claimed` / `settled`: part of a settlement the merchant has signed / that is confirmed on-chain.
+
+A merchant clears owed fees from the dashboard (`GET /fees/owed`, `POST /fees/settlements`, `POST /fees/settlements/:id/submit`). The backend builds one transaction, which pays the owed total per asset from the merchant's own account to the fee account. The merchant signs it in Freighter, and Konfirm submits the signed copy. The signed transaction's hash must match the one built, so it can't be swapped. Konfirm never holds the merchant's key. A background sweep confirms settlements submitted by any route, and releases the claims of settlements that expire unsigned. Admins see who owes what at `GET /admin/fees/owed`. Enforcement is visibility and suspension, not an automatic block. See [docs/design/qr-fee-collection.md](docs/design/qr-fee-collection.md).
+
+## Payment verdicts
+
+The reconciler decides each observed payment's status (`reconciler/src/verdict.rs`, pure and unit-tested). A payment is `paid` only if it matches the link its session reserved: same amount in the link's own asset units, same asset code, and the expected issuer (USDC or EURC from Circle's testnet issuers, native for XLM). The link must still be active. Anything else is recorded as `held` with a `flag_reason`:
+
+| `flag_reason` | Meaning |
+|---|---|
+| `no_session` | No reservation matches this memo |
+| `amount_mismatch` | Under- or overpayment |
+| `asset_mismatch` / `issuer_mismatch` | Wrong asset, or a look-alike token with the right code |
+| `link_inactive` | Link deactivated before the payment landed |
+| `no_fixed_amount` | Pay-what-you-want link, which can't be checked |
+| `blocked_address` | Payer is on the local blocklist |
+
+A payment is not held for a missing fee. A QR or mobile-wallet payer pays the link amount, and the platform fee is recorded as owed by the merchant (see Platform fees below).
+
 ## Payment attestation
 
 The deployed-but-previously-unused `payment` contract (`CCYRA6JT2L4NS5FG4B5TP52JPCGCPYSP7M6LUDUY2QA37V5UBXWJBRHV`) is
@@ -412,7 +468,10 @@ one, not a generic template.
 
 ## Known limitations
 
-- **Testnet only.** Mainnet needs a funded production USDC issuer, `JWT_SECRET` in a real secrets manager, and HTTPS in front of the session cookie.
+- **QR payers' fees are settled by the merchant, not by the payer.** A merchant who never settles keeps a debt on their account. Enforcement is visibility and suspension, not an automatic block.
+- **Fees are collected only in USDC.** The treasury contract takes one token, so XLM and EURC fee balances accumulate unswept.
+
+- **Testnet only, and enforced.** `STELLAR_NETWORK=mainnet` is refused at boot. Horizon and RPC endpoints are configurable, but the USDC/EURC issuers, contract ids, USDC SAC id, and testnet anchor are still testnet values. The full list is in `src/common/stellar-network.ts`. Mainnet also needs a funded production USDC issuer, secrets in a real secrets manager, and HTTPS in front of the session cookie. Hot-key separation is in [docs/KEYS.md](docs/KEYS.md).
 - **XLM, USDC, and EURC.** All three resolve through `resolveAsset()` and get real fee/net USD math via the reconciler's live order-book conversion (see `reconciler/src/horizon.rs`'s `xlm_usdc_rate`/`eurc_usdc_rate`) — no other currency is wired up.
 - **SEP-7/QR compliance screening is after-the-fact, not preventive** — by the time the reconciler can check it, the payment has already landed on-chain. See [Compliance](#compliance) for the full design; this is an architectural ceiling of the SEP-7 flow itself, not something a code change on Konfirm's side can move earlier.
 - **The reconciler watches one merchant address per process.** Fine for a pilot; a real deployment needs either one process per merchant or a multi-account watch loop.

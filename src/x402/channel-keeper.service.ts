@@ -196,7 +196,7 @@ export class ChannelKeeperService {
     const { rows } = await pool.query<{ onchain_channel_id: string; idle_days: number }>(
       `SELECT onchain_channel_id, EXTRACT(DAY FROM NOW() - last_activity_at)::int AS idle_days
        FROM x402_channels
-       WHERE status = 'open' AND last_activity_at < NOW() - INTERVAL '7 days'`,
+       WHERE status = 'open' AND last_activity_at < NOW() - INTERVAL '168 hours'`,
     );
     for (const row of rows) {
       this.logger.warn(
