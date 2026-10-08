@@ -12,8 +12,19 @@ use tokio::time::timeout;
 // Node side for the Freighter checkout path — kept as a plain duplicated
 // constant rather than shared config, matching how the Node side hardcodes
 // it too rather than making it env-configurable.
-const COMPLIANCE_CONTRACT_ID: &str = "CDDVLE2DZQAYFY3Z2Z74TUNNPC4ROUACSBXOB2P64IT75EZFAQXSRSXY";
-const RPC_URL: &str = "https://soroban-testnet.stellar.org";
+const COMPLIANCE_CONTRACT_ID_DEFAULT: &str = "CDDVLE2DZQAYFY3Z2Z74TUNNPC4ROUACSBXOB2P64IT75EZFAQXSRSXY";
+
+// Overridable like the backend's COMPLIANCE_CONTRACT_ID, so both screen against
+// the same contract.
+fn compliance_contract_id() -> String {
+    std::env::var("COMPLIANCE_CONTRACT_ID").unwrap_or_else(|_| COMPLIANCE_CONTRACT_ID_DEFAULT.to_string())
+}
+const RPC_URL_DEFAULT: &str = "https://soroban-testnet.stellar.org";
+
+// Matches the backend's SOROBAN_RPC_URL override.
+fn rpc_url() -> String {
+    std::env::var("SOROBAN_RPC_URL").unwrap_or_else(|_| RPC_URL_DEFAULT.to_string())
+}
 // Used purely as the simulation source account for a read-only call —
 // is_allowed never mutates state, so this account never signs or pays a
 // fee. It just needs to be a real, existing testnet account (simulation
@@ -22,7 +33,13 @@ const RPC_URL: &str = "https://soroban-testnet.stellar.org";
 // one — see run_check's comment on build_for_simulation() for why that's
 // safe. Same already-funded deployer identity onchain-compliance.ts uses
 // on the Node side for the identical reason, not a privileged choice.
-const SIMULATION_SOURCE: &str = "GAEMG5TVLEIQYCY3XB4EJT742DIE3FQO53RSESSYJQUZIWZOJQIZATJS";
+const SIMULATION_SOURCE_DEFAULT: &str = "GAEMG5TVLEIQYCY3XB4EJT742DIE3FQO53RSESSYJQUZIWZOJQIZATJS";
+
+// The read-only source account for simulation. Matches the backend's
+// DEPLOYER_ADDRESS.
+fn simulation_source() -> String {
+    std::env::var("DEPLOYER_ADDRESS").unwrap_or_else(|_| SIMULATION_SOURCE_DEFAULT.to_string())
+}
 const CHECK_TIMEOUT: Duration = Duration::from_secs(8);
 const RETRY_DELAY: Duration = Duration::from_millis(500);
 
@@ -71,8 +88,8 @@ pub async fn is_allowed_on_chain(address: &str) -> bool {
 // Constructing fresh per call is simplest and correct — no shared client
 // state to poison if a call ever hangs.
 async fn run_check(address: &str) -> anyhow::Result<bool> {
-    let rpc = Server::new(RPC_URL, Options::default()).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let contract = Contracts::new(COMPLIANCE_CONTRACT_ID).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let rpc = Server::new(&rpc_url(), Options::default()).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let contract = Contracts::new(&compliance_contract_id()).map_err(|e| anyhow::anyhow!("{e}"))?;
     let addr_scval = Address::new(address)
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .to_sc_val()
@@ -87,7 +104,7 @@ async fn run_check(address: &str) -> anyhow::Result<bool> {
     // test_multiple_simulations_without_incrementing test before trusting
     // this — this method exists specifically so repeated read-only calls
     // like this one never need a real account fetch first.
-    let mut source_account = Account::new(SIMULATION_SOURCE, "0").map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut source_account = Account::new(&simulation_source(), "0").map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let tx = TransactionBuilder::new(&mut source_account, Networks::testnet(), None)
         .fee(100u32)
@@ -127,7 +144,7 @@ mod test {
     // correctly for one value is what actually matters here.
     #[tokio::test]
     async fn is_allowed_returns_true_for_a_known_unblocked_address_on_live_testnet() {
-        let allowed = is_allowed_on_chain(SIMULATION_SOURCE).await;
+        let allowed = is_allowed_on_chain(&simulation_source()).await;
         assert!(allowed, "the facilitator's own address should never be blocked");
     }
 }
