@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { ConflictException, Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { pool } from '../db/pool';
 
 export interface SubmitListingInput {
@@ -21,6 +21,12 @@ interface ListingRow {
   extra: { settleUrl?: string; supportedKinds?: unknown[] };
 }
 
+// Anonymous writes need caps the endpoint can't rely on IP throttling alone
+// to provide: a botnet is many IPs. These bound the admin review queue
+// itself, so a flood can't bury real submissions.
+export const BAZAAR_MAX_PENDING = 100;
+export const BAZAAR_MAX_PER_DAY = 50;
+
 @Injectable()
 export class BazaarService {
   // The public submission endpoint — anyone can propose a listing, but it
@@ -29,6 +35,22 @@ export class BazaarService {
   // same reasoning as deposits.controller.ts/x402.controller.ts: it's
   // called by parties with no prior relationship to Konfirm.
   async submit(input: SubmitListingInput) {
+    const caps = await pool.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE status = 'pending')::int AS pending,
+         COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours')::int AS last_day,
+         COUNT(*) FILTER (WHERE url = $1 AND status = 'pending')::int AS same_url_pending
+       FROM bazaar_listings`,
+      [input.url],
+    );
+    const c = caps.rows[0];
+    if (c.same_url_pending > 0) {
+      throw new ConflictException('a listing for this URL is already awaiting review');
+    }
+    if (c.pending >= BAZAAR_MAX_PENDING || c.last_day >= BAZAAR_MAX_PER_DAY) {
+      throw new ServiceUnavailableException('the listing queue is full right now — please try again later');
+    }
+
     const { rows } = await pool.query(
       `INSERT INTO bazaar_listings (kind, name, url, description, network, scheme, contact_email)
        VALUES ($1, $2, $3, $4, COALESCE($5, 'stellar:testnet'), COALESCE($6, 'exact'), $7)

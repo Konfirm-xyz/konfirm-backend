@@ -7,7 +7,9 @@ import { BazaarService } from './bazaar.service';
 const submitListingSchema = z.object({
   kind: z.enum(['facilitator', 'resource']),
   name: z.string().max(200).optional(),
-  url: z.string().url(),
+  // https only: listings are shown to other developers, and a plain-http
+  // or non-URL value there is either a mistake or a phishing attempt.
+  url: z.string().url().refine((u) => u.startsWith('https://'), 'listing URL must use https'),
   description: z.string().min(1).max(2000),
   network: z.string().max(100).optional(),
   scheme: z.string().max(50).optional(),
