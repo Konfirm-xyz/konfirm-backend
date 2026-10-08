@@ -2,15 +2,13 @@ import { Injectable, UnauthorizedException } from '@nestjs/common';
 import * as bcrypt from 'bcryptjs';
 import * as jwt from 'jsonwebtoken';
 import { pool } from '../db/pool';
+import { resolveSessionSecret } from '../common/secrets';
 
 // A separate signing key from the merchant JWT_SECRET — a leaked merchant
 // secret must never be usable to forge an admin session. Same fail-open-
 // but-never-silent dev fallback as auth.service.ts.
-const ADMIN_JWT_SECRET = process.env.ADMIN_JWT_SECRET ?? (() => {
-  // eslint-disable-next-line no-console
-  console.warn('[admin-auth] ADMIN_JWT_SECRET not set — using an insecure dev-only default. Set ADMIN_JWT_SECRET before this ever leaves localhost.');
-  return 'dev-only-insecure-admin-secret-change-me';
-})();
+// Production refuses to start without a real secret — see common/secrets.ts.
+const ADMIN_JWT_SECRET = resolveSessionSecret('ADMIN_JWT_SECRET', 'dev-only-insecure-admin-secret-change-me');
 // Shorter than the merchant session's 30 days — a higher-privilege surface
 // gets a shorter-lived token, not the same default.
 const TOKEN_TTL = '12h';
@@ -26,7 +24,10 @@ export class AdminAuthService {
   // No signup() here on purpose — see admin-auth.controller.ts.
 
   async login(email: string, password: string): Promise<{ token: string; admin: AdminClaims }> {
-    const { rows } = await pool.query('SELECT id, email, name, password_hash FROM admins WHERE email = $1', [email]);
+    // Matched case-insensitively: admin rows aren't constrained to lowercase.
+    const { rows } = await pool.query('SELECT id, email, name, password_hash FROM admins WHERE lower(email) = $1', [
+      email.trim().toLowerCase(),
+    ]);
     // Same generic error whether the email doesn't exist or the password is
     // wrong, same reasoning as auth.service.ts.
     const invalid = () => new UnauthorizedException('invalid email or password');

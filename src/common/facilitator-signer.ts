@@ -1,25 +1,65 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { createEd25519Signer, STELLAR_TESTNET_CAIP2 } from '@x402/stellar';
+import { createEd25519Signer } from '@x402/stellar';
 import type { Ed25519Signer } from '@x402/stellar';
+import { Keypair } from '@stellar/stellar-sdk';
 import { createKmsEd25519Signer } from './kms-ed25519-signer';
+import { NETWORK_CAIP2 } from './stellar-network';
 
 const execFileAsync = promisify(execFile);
 
-// Same identity resolution as payments.service.ts/compliance.rs/
-// onchain-compliance.ts: a raw secret key in production
-// (STELLAR_DEPLOYER_SECRET_KEY — no interactive `stellar keys add` is
-// possible in a container), or the locally pre-registered 'deployer' CLI
-// identity in dev. Extracted out of x402.service.ts (where this lived
-// standalone until the channel module needed the same signer for its own
-// Soroban submissions) so both X402Service and ChannelService construct
-// the exact same signer once, rather than each resolving the secret key
-// independently.
-async function resolveDeployerSecretKey(): Promise<string> {
+// The facilitator is the hot key: it signs x402 settlements, channel
+// submissions, and sweeps. It must not be the same key as the deployer,
+// which is the admin of the Soroban contracts and one of the treasury
+// signers. A leak of that key would then give an attacker both spend
+// authority and admin authority.
+//
+// Resolution order:
+//   1. FACILITATOR_KMS_KEY_ID: KMS holds the key, nothing secret in env.
+//   2. FACILITATOR_SECRET_KEY: a dedicated raw key, for environments
+//      without KMS.
+//   3. Outside production only: the deployer key (STELLAR_DEPLOYER_SECRET_KEY
+//      or the local `deployer` CLI identity), with a warning. Production
+//      never falls back to it.
+async function resolveFacilitatorSecretKey(): Promise<string | null> {
+  const dedicated = process.env.FACILITATOR_SECRET_KEY;
+  if (dedicated) return dedicated;
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'production needs FACILITATOR_KMS_KEY_ID or FACILITATOR_SECRET_KEY — refusing to sign with the deployer key',
+    );
+  }
+  // eslint-disable-next-line no-console
+  console.warn('[facilitator] using the deployer key for signing — dev only. Set FACILITATOR_SECRET_KEY.');
   const fromEnv = process.env.STELLAR_DEPLOYER_SECRET_KEY;
   if (fromEnv) return fromEnv;
   const { stdout } = await execFileAsync('stellar', ['keys', 'secret', 'deployer']);
   return stdout.trim();
+}
+
+// Fails at boot if two of the three hot identities resolve to the same
+// account. Only checked when the secrets are actually present; a missing
+// one is caught by the resolution above.
+export function assertSeparateHotKeys(env: NodeJS.ProcessEnv = process.env): void {
+  const accounts: Array<[string, string]> = [];
+  const add = (label: string, secret: string | undefined) => {
+    if (!secret) return;
+    try {
+      accounts.push([label, Keypair.fromSecret(secret).publicKey()]);
+    } catch {
+      throw new Error(`${label} is not a valid Stellar secret key`);
+    }
+  };
+  add('STELLAR_DEPLOYER_SECRET_KEY', env.STELLAR_DEPLOYER_SECRET_KEY);
+  add('FACILITATOR_SECRET_KEY', env.FACILITATOR_SECRET_KEY);
+  add('PLATFORM_FEE_SECRET_KEY', env.PLATFORM_FEE_SECRET_KEY);
+  for (let i = 0; i < accounts.length; i++) {
+    for (let j = i + 1; j < accounts.length; j++) {
+      if (accounts[i][1] === accounts[j][1]) {
+        throw new Error(`${accounts[i][0]} and ${accounts[j][0]} are the same account — each hot identity needs its own key`);
+      }
+    }
+  }
 }
 
 let signerPromise: Promise<Ed25519Signer> | null = null;
@@ -37,7 +77,11 @@ export function getFacilitatorSigner(): Promise<Ed25519Signer> {
     const kmsKeyId = process.env.FACILITATOR_KMS_KEY_ID;
     signerPromise = kmsKeyId
       ? createKmsEd25519Signer(kmsKeyId)
-      : resolveDeployerSecretKey().then((secretKey) => createEd25519Signer(secretKey, STELLAR_TESTNET_CAIP2));
+      : resolveFacilitatorSecretKey().then((secretKey) => {
+          if (!secretKey) throw new Error('no facilitator key configured');
+          assertSeparateHotKeys();
+          return createEd25519Signer(secretKey, NETWORK_CAIP2);
+        });
   }
   return signerPromise;
 }
