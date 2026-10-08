@@ -23,7 +23,7 @@ export class AdminFeeRevenueService {
               COUNT(*) AS payment_count,
               COALESCE(SUM(fee_usdc), 0) AS fee_usdc
        FROM payments
-       WHERE status = 'paid' AND created_at >= NOW() - ($1 * INTERVAL '1 day')
+       WHERE status = 'paid' AND created_at >= NOW() - ($1 * INTERVAL '24 hours')
        GROUP BY day
        ORDER BY day DESC`,
       [days],

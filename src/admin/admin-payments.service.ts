@@ -12,7 +12,7 @@ export class AdminPaymentsService {
     }
     params.push(limit, offset);
     const { rows } = await pool.query(
-      `SELECT p.id, p.amount_usdc, p.asset_code, p.payer_address, p.status, p.tx_hash, p.created_at,
+      `SELECT p.id, p.amount_usdc, p.asset_code, p.payer_address, p.status, p.flag_reason, p.tx_hash, p.created_at,
               m.name AS merchant_name, m.email AS merchant_email
        FROM payments p
        JOIN merchants m ON m.id = p.merchant_id

@@ -26,11 +26,11 @@ export class AdminStatsService {
         `SELECT COUNT(*)::int AS count, COALESCE(SUM(net_usdc), 0) AS net_usdc
          FROM payments WHERE created_at >= date_trunc('day', NOW())`,
       ),
-      pool.query(`SELECT COALESCE(SUM(net_usdc), 0) AS net_usdc FROM payments WHERE created_at >= NOW() - INTERVAL '7 days'`),
+      pool.query(`SELECT COALESCE(SUM(net_usdc), 0) AS net_usdc FROM payments WHERE created_at >= NOW() - INTERVAL '168 hours'`),
       pool.query(
         `SELECT date_trunc('day', created_at) AS day, SUM(net_usdc) AS net_usdc
          FROM payments
-         WHERE created_at >= NOW() - INTERVAL '7 days'
+         WHERE created_at >= NOW() - INTERVAL '168 hours'
          GROUP BY day`,
       ),
       pool.query(`SELECT COUNT(*)::int AS count FROM blocked_addresses`),
