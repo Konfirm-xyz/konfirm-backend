@@ -1,8 +1,9 @@
-import { BadRequestException, Body, Controller, Get, Post, Query } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { z } from 'zod';
 import { ZodValidationPipe } from '../zod-validation.pipe';
 import { DepositsService } from './deposits.service';
+import { TestnetFaucetGuard } from './testnet-faucet.guard';
 
 const tokenSchema = z.object({ transaction: z.string().min(1) });
 const startSchema = z.object({
@@ -19,10 +20,11 @@ const transferSchema = z.object({
 
 // No AuthGuard anywhere here — this exists to get test funds into *any*
 // Stellar address, which has no relationship to a Konfirm merchant account.
-// That makes rate limiting the *only* protection this controller has
-// against being used to hammer the external anchor or Horizon, so it's
-// tighter here than on the authenticated withdrawals controller.
+// Two protections: the whole controller is off outside testnet (see
+// TestnetFaucetGuard), and rate limiting bounds how hard it can hit the
+// anchor or Horizon while it is on.
 @Controller('deposits')
+@UseGuards(TestnetFaucetGuard)
 @Throttle({ default: { limit: 10, ttl: 60_000 } })
 export class DepositsController {
   constructor(private readonly deposits: DepositsService) {}
