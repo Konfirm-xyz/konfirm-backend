@@ -1,12 +1,13 @@
 /// <reference path="./x402-stellar-facilitator.d.ts" />
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { createHash } from 'node:crypto';
-import { USDC_TESTNET_ADDRESS, STELLAR_TESTNET_CAIP2, DEFAULT_TESTNET_RPC_URL } from '@x402/stellar';
+import { X402_USDC_ADDRESS, RPC_URL } from '../common/stellar-network';
 import { ExactStellarScheme } from '@x402/stellar/exact/facilitator';
 import type { PaymentPayload, PaymentRequirements, SettleResponse, SupportedResponse, VerifyResponse } from './x402.types';
 import { pool } from '../db/pool';
 import { isAllowedOnChain } from '../common/onchain-compliance';
 import { getFacilitatorSigner, withFacilitatorSubmissionLock } from '../common/facilitator-signer';
+import { NETWORK_CAIP2 } from '../common/stellar-network';
 
 @Injectable()
 export class X402Service implements OnModuleInit {
@@ -14,14 +15,14 @@ export class X402Service implements OnModuleInit {
   private scheme!: ExactStellarScheme;
 
   // Constructed once at startup, not per-request — ExactStellarScheme signs
-  // in-process with real key material (unlike the CLI-shelled compliance
-  // check below), so the signer only needs to be resolved once. The signer
+  // in-process with the facilitator key, so the signer only needs to be
+  // resolved once. The signer
   // itself is shared with ChannelService via getFacilitatorSigner() — same
   // identity, same key, one resolution.
   async onModuleInit() {
     const signer = await getFacilitatorSigner();
     this.scheme = new ExactStellarScheme([signer], {
-      rpcConfig: { url: DEFAULT_TESTNET_RPC_URL },
+      rpcConfig: { url: RPC_URL },
     });
     this.logger.log(`x402 facilitator ready, signing address ${signer.address}`);
   }
@@ -32,8 +33,8 @@ export class X402Service implements OnModuleInit {
         {
           x402Version: 2,
           scheme: 'exact',
-          network: STELLAR_TESTNET_CAIP2,
-          extra: this.scheme.getExtra(STELLAR_TESTNET_CAIP2),
+          network: NETWORK_CAIP2,
+          extra: this.scheme.getExtra(NETWORK_CAIP2),
         },
       ],
       extensions: [],
@@ -99,8 +100,8 @@ export class X402Service implements OnModuleInit {
   private outOfScopeReason(x402Version: number, requirements: PaymentRequirements): string | null {
     if (x402Version !== 2) return 'unsupported_x402_version';
     if (requirements.scheme !== 'exact') return 'unsupported_scheme';
-    if (requirements.network !== STELLAR_TESTNET_CAIP2) return 'unsupported_network';
-    if (requirements.asset !== USDC_TESTNET_ADDRESS) return 'unsupported_asset';
+    if (requirements.network !== NETWORK_CAIP2) return 'unsupported_network';
+    if (requirements.asset !== X402_USDC_ADDRESS) return 'unsupported_asset';
     return null;
   }
 

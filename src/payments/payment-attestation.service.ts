@@ -4,8 +4,8 @@ import { Client } from '@stellar/stellar-sdk/contract';
 import type { MethodOptions, AssembledTransaction, Result } from '@stellar/stellar-sdk/contract';
 import { Networks } from '@stellar/stellar-sdk';
 import { getFacilitatorSigner, withFacilitatorSubmissionLock } from '../common/facilitator-signer';
+import { NETWORK_PASSPHRASE, RPC_URL } from '../common/stellar-network';
 
-const RPC_URL = 'https://soroban-testnet.stellar.org';
 // konfirm-contracts/README.md's "Deployed addresses (Testnet)" table --
 // same source admin-treasury.service.ts/facilitator-sweep.service.ts read
 // their own contract ids from. Confirmed live before wiring anything else
@@ -90,7 +90,7 @@ export class PaymentAttestationService {
         const signer = await getFacilitatorSigner();
         return Client.from<PaymentContract>({
           contractId: PAYMENT_CONTRACT_ID,
-          networkPassphrase: Networks.TESTNET,
+          networkPassphrase: NETWORK_PASSPHRASE,
           rpcUrl: RPC_URL,
           publicKey: signer.address,
           signTransaction: signer.signTransaction,

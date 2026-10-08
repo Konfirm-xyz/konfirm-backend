@@ -17,15 +17,14 @@ import { pool } from '../db/pool';
 import { withRetry } from '../common/retry';
 import { getFacilitatorSigner, withFacilitatorSubmissionLock } from '../common/facilitator-signer';
 import { FacilitatorSpendGuardService, FacilitatorHalted, FacilitatorSpendCapExceeded } from './facilitator-spend-guard.service';
+import { NETWORK_PASSPHRASE, RPC_URL } from '../common/stellar-network';
+import { USDC_SAC_ID, TREASURY_CONTRACT_ID } from '../common/stellar-network';
 
-const RPC_URL = 'https://soroban-testnet.stellar.org';
 // USDC's SAC (SEP-41 token contract) on testnet -- same address
 // admin-treasury.service.ts and @x402/stellar's own ExactStellarScheme use.
-const USDC_SAC_ID = 'CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA';
 // The fixed, fund-custodying treasury instance -- same address
 // admin-treasury.service.ts reads, from konfirm-contracts/README.md's
 // "Deployed addresses (Testnet)" table.
-const TREASURY_CONTRACT_ID = 'CD77HPVBGIRYQGXC4JVCEO35X6FKFFJ2C4EZ63EQCOXGR6OL4TVEPZ2T';
 const STROOPS_PER_UNIT = 10_000_000;
 // Arbitrary but stable pg_advisory_lock key -- namespaced away from
 // ChannelKeeperService's own KEEPER_LOCK_KEY (402_001).
@@ -40,7 +39,7 @@ function getUsdcClient(publicKey: string): Promise<Client & SacTokenContract> {
   if (!clientPromise) {
     clientPromise = Client.from<SacTokenContract>({
       contractId: USDC_SAC_ID,
-      networkPassphrase: Networks.TESTNET,
+      networkPassphrase: NETWORK_PASSPHRASE,
       rpcUrl: RPC_URL,
       publicKey,
     });
@@ -174,40 +173,42 @@ export class FacilitatorSweepService {
       let sentHash: string;
       try {
         const account = await server.getAccount(signer.address);
-        // Simulated off a disposable clone, not `account` itself --
-        // TransactionBuilder.build() mutates its source Account's sequence
-        // number in place, and this simulation-only transaction is never
-        // submitted. See channel.service.ts's submitFacilitatorCall for the
-        // real bug this avoids (a live checkpointChannel() call failing
-        // with a sequence-number-off-by-one before this pattern existed).
-        const simAccount = new Account(account.accountId(), account.sequenceNumber());
-        const simTx = new TransactionBuilder(simAccount, { fee: BASE_FEE, networkPassphrase: Networks.TESTNET })
+        const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK_PASSPHRASE })
           .setTimeout(60)
           .addOperation(contract.call('transfer', ...args))
           .build();
 
-        const sim = await server.simulateTransaction(simTx);
-        if (!rpc.Api.isSimulationSuccess(sim)) {
+        // server.prepareTransaction() simulates AND assembles in one step --
+        // critically, this attaches the SorobanAuthorizationEntry list the
+        // simulation computed, not just the resource footprint. transfer()
+        // calls from.require_auth(): a manual sim.transactionData.build() +
+        // rebuild-the-operation approach (what this used to do, mirroring
+        // channel.service.ts's submitFacilitatorCall) silently drops that
+        // auth list, since contract.call(...) alone has no way to know what
+        // auth simulation decided was necessary -- confirmed for real: this
+        // exact shape submitted successfully (PENDING) but then trapped on
+        // execution with "Unauthorized function call for address <signer>"
+        // (found while building and live-testing fee-collection-sweep.
+        // service.ts's identical pattern). channel.service.ts's own two call
+        // sites (checkpoint/finalize_close) never hit this because neither
+        // of those contract functions calls require_auth() at all -- not
+        // because that pattern is generally correct.
+        let prepared;
+        try {
+          prepared = await server.prepareTransaction(tx);
+        } catch (err) {
+          this.logger.error(`sweep simulation/preparation failed: ${err}`);
           return { success: false, errorReason: 'sweep_simulation_failed' };
         }
-        const sorobanData = sim.transactionData.build();
-        const prepared = new TransactionBuilder(account, {
-          fee: BASE_FEE,
-          networkPassphrase: Networks.TESTNET,
-          sorobanData,
-        })
-          .setTimeout(60)
-          .addOperation(contract.call('transfer', ...args))
-          .build();
 
         const { signedTxXdr, error: signError } = await signer.signTransaction(prepared.toXDR(), {
-          networkPassphrase: Networks.TESTNET,
+          networkPassphrase: NETWORK_PASSPHRASE,
         });
         if (signError || !signedTxXdr) {
           return { success: false, errorReason: 'sweep_signing_failed' };
         }
 
-        const txToSubmit = TransactionBuilder.fromXDR(signedTxXdr, Networks.TESTNET);
+        const txToSubmit = TransactionBuilder.fromXDR(signedTxXdr, NETWORK_PASSPHRASE);
         const sendResult = await server.sendTransaction(txToSubmit);
         if (sendResult.status !== 'PENDING') {
           return { success: false, errorReason: 'sweep_submission_failed' };

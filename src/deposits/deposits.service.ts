@@ -1,15 +1,15 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import { BASE_FEE, Horizon, Networks, Operation, TransactionBuilder } from '@stellar/stellar-sdk';
+import { BASE_FEE, Horizon, Operation, TransactionBuilder } from '@stellar/stellar-sdk';
 import { resolveAsset } from '../common/asset';
-import { fetchWithRetry, withRetry } from '../common/retry';
+import { withRetry } from '../common/retry';
+import { AnchorClient } from '../common/anchor-client';
+import { ANCHOR_AUTH_URL, ANCHOR_TRANSFER_SERVER, HORIZON_URL, NETWORK_PASSPHRASE } from '../common/stellar-network';
 
-const FETCH_TIMEOUT_MS = 10_000;
-
-// Same reference anchor as withdrawals.service.ts. Deposits are the mirror
-// direction: get test USDC into a wallet, for exercising checkout without
-// an external faucet. Not gated behind AuthGuard — there's no Konfirm
-// account involved on either side, just an address willing to receive test
-// money.
+// Same reference anchor as withdrawals.service.ts (see AnchorClient for the
+// shared SEP-10/SEP-24 mechanics). Deposits are the mirror direction: get
+// test USDC into a wallet, for exercising checkout without an external
+// faucet. Not gated behind AuthGuard — there's no Konfirm account involved
+// on either side, just an address willing to receive test money.
 //
 // The SEP-10 login is signed by Freighter, not by scanning a QR with the
 // destination wallet — a QR-based `tx`+callback signing request (the SEP-7
@@ -19,67 +19,28 @@ const FETCH_TIMEOUT_MS = 10_000;
 // already proven throughout this project (cashout.html), so the funds land
 // in whatever account Freighter is connected to first, then get forwarded
 // on-chain to the actual destination wallet with one ordinary payment.
-const WEB_AUTH_ENDPOINT = 'https://testanchor.stellar.org/auth';
-const TRANSFER_SERVER = 'https://testanchor.stellar.org/sep24';
-const HORIZON_URL = 'https://horizon-testnet.stellar.org';
-
 @Injectable()
 export class DepositsService {
   private horizon = new Horizon.Server(HORIZON_URL);
+  private anchor = new AnchorClient(
+    { webAuthUrl: ANCHOR_AUTH_URL, transferServerUrl: ANCHOR_TRANSFER_SERVER },
+    { partnerLabel: 'test-funds partner', actionNoun: 'deposit' },
+  );
 
-  // GET, no side effects — safe to retry freely. fetchWithRetry only
-  // retries transport failures and 5xx; a 4xx means the same thing on
-  // every attempt, so it's returned immediately instead of wasting time.
-  async getChallenge(account: string) {
-    const res = await fetchWithRetry(`${WEB_AUTH_ENDPOINT}?account=${encodeURIComponent(account)}`, {}, { timeoutMs: FETCH_TIMEOUT_MS });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new BadRequestException(body.error || 'could not reach the test-funds partner');
-    return body;
+  getChallenge(account: string) {
+    return this.anchor.getChallenge(account);
   }
 
-  // One retry — resubmitting the same already-signed challenge is safe.
-  async exchangeToken(signedTransaction: string) {
-    const res = await fetchWithRetry(
-      WEB_AUTH_ENDPOINT,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ transaction: signedTransaction }),
-      },
-      { retries: 1, timeoutMs: FETCH_TIMEOUT_MS },
-    );
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new BadRequestException(body.error || 'the test-funds partner rejected that signature');
-    return body;
+  exchangeToken(signedTransaction: string) {
+    return this.anchor.exchangeToken(signedTransaction);
   }
 
-  // No retry, same reasoning as withdrawals.service.ts's startWithdrawal:
-  // this creates a new transaction on the anchor's side every time it
-  // succeeds, so a lost response can't be safely retried without risking a
-  // duplicate.
-  async startDeposit(token: string, currency: string, account: string) {
-    const assetCode = currency === 'XLM' ? 'native' : currency;
-    const res = await fetch(`${TRANSFER_SERVER}/transactions/deposit/interactive`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ asset_code: assetCode, account }),
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new BadRequestException(body.error || 'could not start a deposit');
-    return body;
+  startDeposit(token: string, currency: string, account: string) {
+    return this.anchor.startInteractive('deposit', token, currency, account);
   }
 
-  // A read, polled repeatedly anyway by the caller — safe to retry.
-  async getStatus(token: string, id: string) {
-    const res = await fetchWithRetry(
-      `${TRANSFER_SERVER}/transaction?id=${encodeURIComponent(id)}`,
-      { headers: { Authorization: `Bearer ${token}` } },
-      { timeoutMs: FETCH_TIMEOUT_MS },
-    );
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new BadRequestException(body.error || 'could not check deposit status');
-    return body.transaction;
+  getStatus(token: string, id: string) {
+    return this.anchor.getStatus(token, id);
   }
 
   // The second on-chain leg: once the anchor has deposited test funds into
@@ -95,7 +56,7 @@ export class DepositsService {
 
     const builder = new TransactionBuilder(fromAccount, {
       fee: BASE_FEE,
-      networkPassphrase: Networks.TESTNET,
+      networkPassphrase: NETWORK_PASSPHRASE,
     });
 
     if (!asset.isNative()) {
@@ -123,6 +84,6 @@ export class DepositsService {
       .setTimeout(60)
       .build();
 
-    return { xdr: tx.toXDR(), network_passphrase: Networks.TESTNET };
+    return { xdr: tx.toXDR(), network_passphrase: NETWORK_PASSPHRASE };
   }
 }

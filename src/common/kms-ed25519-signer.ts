@@ -65,7 +65,7 @@ export async function createKmsEd25519Signer(keyId: string): Promise<Ed25519Sign
     }
     try {
       const tx = new Transaction(xdr, networkPassphrase);
-      const signature = await signWithKms(client, keyId, tx.hash());
+      const signature = await signWithKms(client, keyId, Buffer.from(tx.hash()));
       tx.addSignature(address, signature.toString('base64'));
       return { signedTxXdr: tx.toXDR(), signerAddress: address };
     } catch (err) {

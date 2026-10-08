@@ -16,6 +16,8 @@ import { pool } from '../db/pool';
 import { verifyClaimSignature } from '../common/channel-claim';
 import { getFacilitatorSigner, withFacilitatorSubmissionLock } from '../common/facilitator-signer';
 import { isAllowedOnChain } from '../common/onchain-compliance';
+import { NETWORK_PASSPHRASE, RPC_URL } from '../common/stellar-network';
+import { CHANNEL_CONTRACT_ID } from '../common/stellar-network';
 
 export interface FacilitatorCallResult {
   success: boolean;
@@ -42,8 +44,6 @@ export interface CloseChannelResult {
   errorReason?: string;
 }
 
-const CHANNEL_CONTRACT_ID = 'CDS2Y4CQMQWFLCG5GHVKX7UIXHYPM6IJDJZTEXSASSHGHLESGLGLNPL6';
-const RPC_URL = 'https://soroban-testnet.stellar.org';
 
 @Injectable()
 export class ChannelService {
@@ -150,7 +150,7 @@ export class ChannelService {
     const server = new rpc.Server(RPC_URL);
     let transaction: Transaction;
     try {
-      transaction = new Transaction(params.transactionXdr, Networks.TESTNET);
+      transaction = new Transaction(params.transactionXdr, NETWORK_PASSPHRASE);
     } catch {
       return { success: false, errorReason: 'malformed_transaction' };
     }
@@ -172,13 +172,13 @@ export class ChannelService {
     }
 
     const func = operation.func;
-    if (!func || func.switch().name !== 'hostFunctionTypeInvokeContract') {
+    if (!func || func.type !== 'hostFunctionTypeInvokeContract') {
       return { success: false, errorReason: 'wrong_operation_type' };
     }
-    const invokeArgs = func.invokeContract();
-    const contractAddress = Address.fromScAddress(invokeArgs.contractAddress()).toString();
-    const functionName = invokeArgs.functionName().toString();
-    const args = invokeArgs.args();
+    const invokeArgs = func.invokeContract;
+    const contractAddress = Address.fromScAddress(invokeArgs.contractAddress).toString();
+    const functionName = invokeArgs.functionName.toString();
+    const args = invokeArgs.args;
     if (contractAddress !== CHANNEL_CONTRACT_ID) {
       return { success: false, errorReason: 'wrong_contract' };
     }
@@ -229,7 +229,7 @@ export class ChannelService {
         const sorobanData = simResponse.transactionData.build();
         const rebuiltTx = new TransactionBuilder(facilitatorAccount, {
           fee: BASE_FEE,
-          networkPassphrase: Networks.TESTNET,
+          networkPassphrase: NETWORK_PASSPHRASE,
           sorobanData,
         })
           .setTimeout(60)
@@ -237,13 +237,13 @@ export class ChannelService {
           .build();
 
         const { signedTxXdr, error: signError } = await signer.signTransaction(rebuiltTx.toXDR(), {
-          networkPassphrase: Networks.TESTNET,
+          networkPassphrase: NETWORK_PASSPHRASE,
         });
         if (signError || !signedTxXdr) {
           return { ok: false, result: { success: false, errorReason: 'signing_failed' } };
         }
 
-        const txToSubmit = TransactionBuilder.fromXDR(signedTxXdr, Networks.TESTNET);
+        const txToSubmit = TransactionBuilder.fromXDR(signedTxXdr, NETWORK_PASSPHRASE);
         const sendResult = await server.sendTransaction(txToSubmit);
         if (sendResult.status !== 'PENDING') {
           return { ok: false, result: { success: false, errorReason: 'submission_failed' } };
@@ -286,7 +286,7 @@ export class ChannelService {
     const server = new rpc.Server(RPC_URL);
     let transaction: Transaction;
     try {
-      transaction = new Transaction(params.transactionXdr, Networks.TESTNET);
+      transaction = new Transaction(params.transactionXdr, NETWORK_PASSPHRASE);
     } catch {
       return { success: false, errorReason: 'malformed_transaction' };
     }
@@ -305,13 +305,13 @@ export class ChannelService {
     }
 
     const func = operation.func;
-    if (!func || func.switch().name !== 'hostFunctionTypeInvokeContract') {
+    if (!func || func.type !== 'hostFunctionTypeInvokeContract') {
       return { success: false, errorReason: 'wrong_operation_type' };
     }
-    const invokeArgs = func.invokeContract();
-    const contractAddress = Address.fromScAddress(invokeArgs.contractAddress()).toString();
-    const functionName = invokeArgs.functionName().toString();
-    const args = invokeArgs.args();
+    const invokeArgs = func.invokeContract;
+    const contractAddress = Address.fromScAddress(invokeArgs.contractAddress).toString();
+    const functionName = invokeArgs.functionName.toString();
+    const args = invokeArgs.args;
     if (contractAddress !== CHANNEL_CONTRACT_ID) {
       return { success: false, errorReason: 'wrong_contract' };
     }
@@ -358,7 +358,7 @@ export class ChannelService {
         const sorobanData = simResponse.transactionData.build();
         const rebuiltTx = new TransactionBuilder(facilitatorAccount, {
           fee: BASE_FEE,
-          networkPassphrase: Networks.TESTNET,
+          networkPassphrase: NETWORK_PASSPHRASE,
           sorobanData,
         })
           .setTimeout(60)
@@ -366,13 +366,13 @@ export class ChannelService {
           .build();
 
         const { signedTxXdr, error: signError } = await signer.signTransaction(rebuiltTx.toXDR(), {
-          networkPassphrase: Networks.TESTNET,
+          networkPassphrase: NETWORK_PASSPHRASE,
         });
         if (signError || !signedTxXdr) {
           return { ok: false, result: { success: false, errorReason: 'signing_failed' } };
         }
 
-        const txToSubmit = TransactionBuilder.fromXDR(signedTxXdr, Networks.TESTNET);
+        const txToSubmit = TransactionBuilder.fromXDR(signedTxXdr, NETWORK_PASSPHRASE);
         const sendResult = await server.sendTransaction(txToSubmit);
         if (sendResult.status !== 'PENDING') {
           return { ok: false, result: { success: false, errorReason: 'submission_failed' } };
@@ -442,7 +442,7 @@ export class ChannelService {
     // envelope's source, same reasoning Arbiter's stellarClient.js already
     // documents for its own read-only simulateReadOnly() helper.
     const account = await server.getAccount(signer.address);
-    const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: Networks.TESTNET })
+    const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK_PASSPHRASE })
       .setTimeout(30)
       .addOperation(contract.call('get_channel_info', nativeToScVal(onchainChannelId, { type: 'u64' })))
       .build();
@@ -479,7 +479,7 @@ export class ChannelService {
         // real checkpointChannel() call against live testnet failing with
         // exactly this shape of error before this fix.
         const simAccount = new Account(account.accountId(), account.sequenceNumber());
-        const tx = new TransactionBuilder(simAccount, { fee: BASE_FEE, networkPassphrase: Networks.TESTNET })
+        const tx = new TransactionBuilder(simAccount, { fee: BASE_FEE, networkPassphrase: NETWORK_PASSPHRASE })
           .setTimeout(60)
           .addOperation(contract.call(functionName, ...args))
           .build();
@@ -489,19 +489,19 @@ export class ChannelService {
           return { success: false, errorReason: `${logLabel}_simulation_failed` };
         }
         const sorobanData = sim.transactionData.build();
-        const prepared = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: Networks.TESTNET, sorobanData })
+        const prepared = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK_PASSPHRASE, sorobanData })
           .setTimeout(60)
           .addOperation(contract.call(functionName, ...args))
           .build();
 
         const { signedTxXdr, error: signError } = await signer.signTransaction(prepared.toXDR(), {
-          networkPassphrase: Networks.TESTNET,
+          networkPassphrase: NETWORK_PASSPHRASE,
         });
         if (signError || !signedTxXdr) {
           return { success: false, errorReason: `${logLabel}_signing_failed` };
         }
 
-        const txToSubmit = TransactionBuilder.fromXDR(signedTxXdr, Networks.TESTNET);
+        const txToSubmit = TransactionBuilder.fromXDR(signedTxXdr, NETWORK_PASSPHRASE);
         const sendResult = await server.sendTransaction(txToSubmit);
         if (sendResult.status !== 'PENDING') {
           return { success: false, errorReason: `${logLabel}_submission_failed` };

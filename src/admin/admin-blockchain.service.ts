@@ -1,25 +1,24 @@
 import { Injectable } from '@nestjs/common';
 import { Horizon, rpc } from '@stellar/stellar-sdk';
 import { withRetry } from '../common/retry';
+import { HORIZON_URL, RPC_URL } from '../common/stellar-network';
+import { FACILITATOR_ADDRESS, COMPLIANCE_CONTRACT_ID, PAYMENT_CONTRACT_ID, TREASURY_CONTRACT_ID, CHANNEL_CONTRACT_ID } from '../common/stellar-network';
 
-const HORIZON_URL = 'https://horizon-testnet.stellar.org';
-const RPC_URL = 'https://soroban-testnet.stellar.org';
 
 // Same facilitator identity used everywhere else (facilitator-signer.ts,
 // onchain-compliance.ts's simulation source, konfirm-contracts' deployer)
 // and the four contract addresses from konfirm-contracts/README.md's
 // "Deployed addresses (Testnet)" table — this page has no state of its
 // own to be wrong about, it just asks the chain live every request.
-const FACILITATOR_ADDRESS = 'GAEMG5TVLEIQYCY3XB4EJT742DIE3FQO53RSESSYJQUZIWZOJQIZATJS';
 
 const CONTRACTS = [
-  { name: 'Compliance', id: 'CDDVLE2DZQAYFY3Z2Z74TUNNPC4ROUACSBXOB2P64IT75EZFAQXSRSXY' },
-  { name: 'Payment', id: 'CCYRA6JT2L4NS5FG4B5TP52JPCGCPYSP7M6LUDUY2QA37V5UBXWJBRHV' },
+  { name: 'Compliance', id: COMPLIANCE_CONTRACT_ID },
+  { name: 'Payment', id: PAYMENT_CONTRACT_ID },
   // Redeployed when execute_settlement was fixed to actually transfer funds
   // (konfirm-contracts d55d546/7a4b664) — the old address here was stale,
   // pointing at the pre-fix instance.
-  { name: 'Treasury', id: 'CD77HPVBGIRYQGXC4JVCEO35X6FKFFJ2C4EZ63EQCOXGR6OL4TVEPZ2T' },
-  { name: 'Channel', id: 'CDS2Y4CQMQWFLCG5GHVKX7UIXHYPM6IJDJZTEXSASSHGHLESGLGLNPL6' },
+  { name: 'Treasury', id: TREASURY_CONTRACT_ID },
+  { name: 'Channel', id: CHANNEL_CONTRACT_ID },
 ];
 
 @Injectable()

@@ -3,9 +3,9 @@ import { Client } from '@stellar/stellar-sdk/contract';
 import type { AssembledTransaction, MethodOptions } from '@stellar/stellar-sdk/contract';
 import { Networks } from '@stellar/stellar-sdk';
 import { withRetry } from './retry';
+import { NETWORK_PASSPHRASE, RPC_URL } from './stellar-network';
+import { COMPLIANCE_CONTRACT_ID, DEPLOYER_ADDRESS } from './stellar-network';
 
-const COMPLIANCE_CONTRACT_ID = 'CDDVLE2DZQAYFY3Z2Z74TUNNPC4ROUACSBXOB2P64IT75EZFAQXSRSXY';
-const RPC_URL = 'https://soroban-testnet.stellar.org';
 
 // Used purely as the simulation source account for a read-only call —
 // is_allowed never mutates state, so this account never signs or pays a
@@ -13,7 +13,6 @@ const RPC_URL = 'https://soroban-testnet.stellar.org';
 // still needs a valid source-account context); the already-funded deployer
 // identity used elsewhere this session is a convenient, known-good choice,
 // not a privileged one for this specific call.
-const SIMULATION_SOURCE = 'GAEMG5TVLEIQYCY3XB4EJT742DIE3FQO53RSESSYJQUZIWZOJQIZATJS';
 
 interface ComplianceContract {
   is_allowed(args: { addr: string }, options?: MethodOptions): Promise<AssembledTransaction<boolean>>;
@@ -22,7 +21,7 @@ interface ComplianceContract {
 // Constructed once and reused — Client.from() does a real network round
 // trip (fetching the contract's spec) the first time, ~1s; every call
 // after that is a single fast simulate-only RPC round trip (no signing, no
-// submission), replacing what used to be a `stellar` CLI subprocess spawn.
+// submission).
 // Cleared on any failure (see isAllowedOnChain) rather than left cached
 // forever: a promise that never resolves would otherwise poison every
 // future call for the lifetime of the process, since awaiting an
@@ -32,9 +31,9 @@ function getClient(): Promise<Client & ComplianceContract> {
   if (!clientPromise) {
     clientPromise = Client.from<ComplianceContract>({
       contractId: COMPLIANCE_CONTRACT_ID,
-      networkPassphrase: Networks.TESTNET,
+      networkPassphrase: NETWORK_PASSPHRASE,
       rpcUrl: RPC_URL,
-      publicKey: SIMULATION_SOURCE,
+      publicKey: DEPLOYER_ADDRESS,
     });
   }
   return clientPromise;

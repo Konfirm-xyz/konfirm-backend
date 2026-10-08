@@ -4,22 +4,15 @@ import { Client } from '@stellar/stellar-sdk/contract';
 import type { AssembledTransaction, MethodOptions } from '@stellar/stellar-sdk/contract';
 import { Networks } from '@stellar/stellar-sdk';
 import { withRetry } from '../common/retry';
+import { NETWORK_PASSPHRASE, RPC_URL } from '../common/stellar-network';
+import { USDC_SAC_ID, TREASURY_CONTRACT_ID, TREASURY_SIGNERS, DEPLOYER_ADDRESS } from '../common/stellar-network';
 
-const RPC_URL = 'https://soroban-testnet.stellar.org';
 // USDC's SAC (SEP-41 token contract) on testnet — same address
 // @x402/stellar's own ExactStellarScheme uses (USDC_TESTNET_ADDRESS).
-const USDC_SAC_ID = 'CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA';
 // From konfirm-contracts/README.md's "Deployed addresses (Testnet)" table.
-const TREASURY_CONTRACT_ID = 'CD77HPVBGIRYQGXC4JVCEO35X6FKFFJ2C4EZ63EQCOXGR6OL4TVEPZ2T';
-const TREASURY_SIGNERS = [
-  'GAEMG5TVLEIQYCY3XB4EJT742DIE3FQO53RSESSYJQUZIWZOJQIZATJS',
-  'GBRUR4UZHKPQ76S4S7X7INENL6QJ4UGNFIQ3F6VAYJQZRO3F4XBZAIND',
-  'GCP57AJNZIVVTPPSD4MJ2SQDMTN4QEAUP64U2OZ4HXSAU4O4A6NOWY2Z',
-];
 // Same convenience simulation source as onchain-compliance.ts — a
 // read-only `balance` call never signs or pays a fee, it just needs a
 // real, funded source account for simulation context.
-const SIMULATION_SOURCE = 'GAEMG5TVLEIQYCY3XB4EJT742DIE3FQO53RSESSYJQUZIWZOJQIZATJS';
 
 interface SacTokenContract {
   balance(args: { id: string }, options?: MethodOptions): Promise<AssembledTransaction<bigint>>;
@@ -30,9 +23,9 @@ function getUsdcClient(): Promise<Client & SacTokenContract> {
   if (!clientPromise) {
     clientPromise = Client.from<SacTokenContract>({
       contractId: USDC_SAC_ID,
-      networkPassphrase: Networks.TESTNET,
+      networkPassphrase: NETWORK_PASSPHRASE,
       rpcUrl: RPC_URL,
-      publicKey: SIMULATION_SOURCE,
+      publicKey: DEPLOYER_ADDRESS,
     });
   }
   return clientPromise;
@@ -65,11 +58,15 @@ export class AdminTreasuryService {
       threshold: '2-of-3',
       usdc_balance: usdcBalance,
       reachable,
-      // The treasury contract is deployed but nothing in the live checkout
-      // or x402 path routes funds through it yet (tracked as an open
-      // GitHub issue on konfirm-backend) — surfaced explicitly here rather
-      // than implied by an empty balance, which would look like a bug.
-      wired_into_checkout: false,
+      // Checkout's USDC-denominated fee revenue reaches this contract via
+      // FeeCollectionSweepService, not a direct call at checkout time — a
+      // Soroban contract invocation must be the sole operation in its
+      // transaction, so the fee leg (payments.service.ts's prepareTx) can
+      // only ever be a plain classic Payment into PLATFORM_FEE_ADDRESS,
+      // which this sweep then moves into custody periodically. XLM/EURC
+      // fee revenue is NOT covered — this instance was initialized with a
+      // single USDC token and cannot custody other assets.
+      wired_into_checkout: true,
     };
   }
 }

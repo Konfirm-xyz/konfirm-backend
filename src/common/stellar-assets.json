@@ -1,0 +1,7 @@
+{
+  "_comment": "Shared by konfirm-backend (src/common/asset.ts) and the reconciler (reconciler/src/main.rs, guarded by a test). Edit here only. Testnet issuers confirmed against Horizon's /assets.",
+  "testnet": {
+    "USDC": "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+    "EURC": "GB3Q6QDZYTHWT7E5PVS3W7FUT5GVAFC5KSZFFLPU25GO7VTC3NM2ZTVO"
+  }
+}

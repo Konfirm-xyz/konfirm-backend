@@ -1,12 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { pool } from '../db/pool';
+import { USDC_ISSUER } from '../common/stellar-network';
+import { HORIZON_URL } from '../common/stellar-network';
 
-const HORIZON_TESTNET = 'https://horizon-testnet.stellar.org';
 // Same testnet USDC issuer as src/common/asset.ts and the reconciler's
 // Rust copy (reconciler/src/main.rs) — three independent copies of the
 // same constant across two languages/processes, since none of them share
 // a config-loading mechanism today.
-const USDC_TESTNET_ISSUER = 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5';
 
 interface OrderBookLevel {
   price: string;
@@ -29,7 +29,7 @@ export class AdminExchangeRateService {
 
   async liveXlmUsdcRate(): Promise<{ rate: string | null; reachable: boolean }> {
     try {
-      const url = `${HORIZON_TESTNET}/order_book?selling_asset_type=native&buying_asset_type=credit_alphanum4&buying_asset_code=USDC&buying_asset_issuer=${USDC_TESTNET_ISSUER}`;
+      const url = `${HORIZON_URL}/order_book?selling_asset_type=native&buying_asset_type=credit_alphanum4&buying_asset_code=USDC&buying_asset_issuer=${USDC_ISSUER}`;
       const res = await fetch(url);
       if (!res.ok) throw new Error(`horizon returned ${res.status}`);
       const body = (await res.json()) as OrderBookResponse;
