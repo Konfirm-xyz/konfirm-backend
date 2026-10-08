@@ -139,7 +139,7 @@ impl Store {
     /// not in Rust, specifically so the decision logic in
     /// `resolve_effective_fee_bps` stays a pure, unit-testable function
     /// with no chrono dependency at all.
-    async fn effective_fee_bps(&self, merchant: &Merchant) -> Result<i32> {
+    pub async fn effective_fee_bps(&self, merchant: &Merchant) -> Result<i32> {
         let row: (Option<i32>, bool, Option<Decimal>, Decimal) = sqlx::query_as(
             "SELECT
                 promo_fee_bps,
@@ -161,6 +161,13 @@ impl Store {
         ))
     }
 
+    // fee_usdc/fee_paging_token arrive already resolved by the caller
+    // (main.rs), which separately observes the real fee-collection leg in
+    // the same transaction (or confirms none exists) — this function no
+    // longer computes fee as a fraction of gross itself. Additive fee
+    // collection means gross/net here are the merchant's own leg, untouched
+    // by whatever the fee leg did or didn't do: net_usdc is simply what the
+    // merchant actually received, same as before this feature existed.
     #[allow(clippy::too_many_arguments)]
     pub async fn record_payment_if_new(
         &self,
@@ -171,14 +178,19 @@ impl Store {
         asset_code: &str,
         asset_issuer: Option<&str>,
         amount: &str,
+        fee_usdc: Decimal,
+        fee_paging_token: Option<&str>,
         fx_rate_to_usd: Option<Decimal>,
         paging_token: &str,
         tx_hash: &str,
+        verdict: &crate::verdict::Verdict,
+        fee_status: &str,
+        fee_owed_raw: Option<Decimal>,
+        fee_asset_code: &str,
+        fee_asset_issuer: Option<&str>,
     ) -> Result<Option<RecordedPayment>> {
         let gross = Decimal::from_str(amount).context("horizon returned a non-decimal amount")?;
-        let fee_bps = self.effective_fee_bps(merchant).await?;
-        let fee = (gross * Decimal::from(fee_bps)) / Decimal::from(10_000);
-        let net = gross - fee;
+        let net = gross;
 
         // Horizon paging tokens for operations are TOIDs: ledger sequence in
         // the high 32 bits, tx order and op order in the low 32. Decoding it
@@ -198,17 +210,20 @@ impl Store {
         .await?
         .map(|(id,)| id);
 
+        // A locally-blocked payer overrides any verdict: held, reason says why.
         let locally_blocked = self.is_locally_blocked(payer_address).await?;
-        let status = if locally_blocked { "held" } else { "paid" };
+        let status = if locally_blocked { "held" } else { verdict.status };
+        let flag_reason = if locally_blocked { Some("blocked_address") } else { verdict.flag_reason };
 
         let inserted: Option<(Uuid,)> = sqlx::query_as(
             "INSERT INTO payments
                 (merchant_id, link_id, muxed_id, muxed_address, payer_address,
                  asset_code, asset_issuer, amount_usdc, fee_usdc, net_usdc, fx_rate_to_usd,
-                 channel, status, paging_token, tx_hash, ledger_sequence)
+                 channel, status, paging_token, tx_hash, ledger_sequence, fee_paging_token,
+                 flag_reason, fee_status, fee_owed_raw, fee_asset_code, fee_asset_issuer)
              VALUES
                 ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-                 'hosted_checkout', $12, $13, $14, $15)
+                 'hosted_checkout', $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
              ON CONFLICT (paging_token) DO NOTHING
              RETURNING id",
         )
@@ -220,17 +235,49 @@ impl Store {
         .bind(asset_code)
         .bind(asset_issuer)
         .bind(gross)
-        .bind(fee)
+        .bind(fee_usdc)
         .bind(net)
         .bind(fx_rate_to_usd)
         .bind(status)
         .bind(paging_token)
         .bind(tx_hash)
         .bind(ledger_sequence)
+        .bind(fee_paging_token)
+        .bind(flag_reason)
+        .bind(fee_status)
+        .bind(fee_owed_raw)
+        .bind(fee_asset_code)
+        .bind(fee_asset_issuer)
         .fetch_optional(&self.pool)
         .await?;
 
         Ok(inserted.map(|(id,)| RecordedPayment { id, locally_blocked }))
+    }
+
+    /// What the session reserved for this muxed id: its link, expected amount
+    /// and currency. `None` when no session matches, which the verdict treats
+    /// as a payment nobody asked for. Fetched per payment rather than cached,
+    /// so a link deactivated mid-session is seen on the next payment.
+    pub async fn link_expectation(
+        &self,
+        merchant_id: Uuid,
+        muxed_id: i64,
+    ) -> Result<Option<crate::verdict::LinkExpectation>> {
+        let row: Option<(Option<Decimal>, String, bool)> = sqlx::query_as(
+            "SELECT l.amount_usdc, l.currency, l.active
+             FROM link_sessions ls
+             JOIN links l ON l.id = ls.link_id
+             WHERE ls.merchant_id = $1 AND ls.muxed_id = $2",
+        )
+        .bind(merchant_id)
+        .bind(muxed_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|(amount, currency, active)| crate::verdict::LinkExpectation {
+            amount,
+            currency,
+            active,
+        }))
     }
 
     pub async fn get_cursor(&self) -> Result<String> {
@@ -253,6 +300,85 @@ impl Store {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// The `watch-all` equivalent of `get_cursor` — same table, a
+    /// per-merchant key (`cursor:<id>`) instead of the single hardcoded
+    /// `'cursor'` row, so two merchants polling concurrently in the same
+    /// process never share (and clobber) one position.
+    pub async fn get_cursor_for_merchant(&self, merchant_id: Uuid) -> Result<String> {
+        let key = format!("cursor:{merchant_id}");
+        let row: Option<(String,)> = sqlx::query_as("SELECT value FROM reconciler_state WHERE key = $1")
+            .bind(&key)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|(v,)| v).unwrap_or_else(|| "now".to_string()))
+    }
+
+    /// The `watch-all` equivalent of `set_cursor` — same "only after the
+    /// commit" discipline applies here, unchanged.
+    pub async fn set_cursor_for_merchant(&self, merchant_id: Uuid, cursor: &str) -> Result<()> {
+        let key = format!("cursor:{merchant_id}");
+        sqlx::query(
+            "INSERT INTO reconciler_state (key, value, updated_at) VALUES ($1, $2, NOW())
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = NOW()",
+        )
+        .bind(&key)
+        .bind(cursor)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// One-time migration helper, not a schema migration: carries the old
+    /// single global `'cursor'` row forward as *one specific* merchant's
+    /// starting point, the one that was actually being watched under the
+    /// old single-process `watch` command. Idempotent — a no-op once that
+    /// merchant already has its own `cursor:<id>` row, so it's safe to call
+    /// on every `watch-all` startup rather than needing a "have I already
+    /// done this" flag anywhere.
+    ///
+    /// Deliberately NOT applied to every merchant indiscriminately: Horizon
+    /// paging tokens are TOIDs (see record_payment_if_new's doc comment) —
+    /// real, comparable ledger positions, not an opaque per-account handle
+    /// — so handing a brand-new merchant a cursor position that reflects a
+    /// *different* merchant's progress would silently skip real history it
+    /// never actually processed, not just harmlessly replay a starting
+    /// point.
+    pub async fn bootstrap_merchant_cursor_from_legacy(&self, merchant_id: Uuid) -> Result<()> {
+        let key = format!("cursor:{merchant_id}");
+        let already_has_own_cursor: Option<(String,)> =
+            sqlx::query_as("SELECT value FROM reconciler_state WHERE key = $1")
+                .bind(&key)
+                .fetch_optional(&self.pool)
+                .await?;
+        if already_has_own_cursor.is_some() {
+            return Ok(());
+        }
+        let legacy: Option<(String,)> = sqlx::query_as("SELECT value FROM reconciler_state WHERE key = 'cursor'")
+            .fetch_optional(&self.pool)
+            .await?;
+        if let Some((legacy_cursor,)) = legacy {
+            self.set_cursor_for_merchant(merchant_id, &legacy_cursor).await?;
+        }
+        Ok(())
+    }
+
+    /// Drives `watch-all`'s merchant-registry refresh loop. Mirrors
+    /// `payments.service.ts`'s own `status = 'active'` gate: a merchant
+    /// that isn't active can't receive a new payment through the normal
+    /// checkout flow anyway, so there's nothing useful to watch for it.
+    /// Filters out a NULL `stellar_base_address` (a merchant who hasn't
+    /// finished onboarding yet) rather than letting it reach Horizon as an
+    /// empty-string account id.
+    pub async fn find_active_merchants(&self) -> Result<Vec<(Uuid, String)>> {
+        let rows: Vec<(Uuid, String)> = sqlx::query_as(
+            "SELECT id, stellar_base_address FROM merchants
+             WHERE status = 'active' AND stellar_base_address IS NOT NULL",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
     }
 }
 
@@ -317,5 +443,66 @@ mod test {
         // the function's actual contract) must not accidentally activate
         // a discount that was never granted.
         assert_eq!(resolve_effective_fee_bps(10, None, true, Some(Decimal::from(500)), Decimal::from(0)), 10);
+    }
+}
+
+#[cfg(test)]
+mod db_tests {
+    use super::*;
+    use crate::verdict::Verdict;
+
+    // Needs a migrated Postgres. Run with:
+    //   TEST_DATABASE_URL=postgres:///konfirm_test cargo test -- --ignored
+    // Exercises the real INSERT, including the fee columns, which only a live
+    // schema can check.
+    #[tokio::test]
+    #[ignore]
+    async fn records_an_owed_fee_with_its_asset() {
+        let url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| "postgres:///konfirm_test".to_string());
+        let store = Store::connect(&url).await.unwrap();
+        let email = format!("owed-{}@example.com", Uuid::new_v4());
+        let address = "GBXBABMFZIJPTOFI6STUXA2FMEXDBB4URBD3VS5XDHKMFHGLJZ5WPQBB";
+        let merchant = store.upsert_merchant_by_stellar_address(address, &email, "Owed Test").await.unwrap();
+
+        let paging = format!("owed-paging-{}", Uuid::new_v4());
+        let owed = Decimal::from_str("0.0100000").unwrap();
+        let verdict = Verdict { status: "paid", flag_reason: None };
+        let recorded = store
+            .record_payment_if_new(
+                &merchant,
+                4242,
+                address,
+                "GDIET4T37N35XU4FY52RMR4Z653WYFITEHGIJXN4VEQTDYR5JSURJDPL",
+                "XLM",
+                None,
+                "1.0000000",
+                owed,
+                None,
+                None,
+                &paging,
+                "owed-tx",
+                &verdict,
+                "owed",
+                Some(owed),
+                "XLM",
+                None,
+            )
+            .await
+            .unwrap()
+            .expect("a new paging token is inserted");
+
+        let row: (String, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT fee_status, fee_owed_raw::text, fee_asset_code FROM payments WHERE id = $1",
+        )
+        .bind(recorded.id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0, "owed");
+        assert_eq!(row.1.as_deref(), Some("0.0100000"));
+        assert_eq!(row.2.as_deref(), Some("XLM"));
+
+        sqlx::query("DELETE FROM payments WHERE id = $1").bind(recorded.id).execute(&store.pool).await.unwrap();
+        sqlx::query("DELETE FROM merchants WHERE id = $1").bind(merchant.id).execute(&store.pool).await.unwrap();
     }
 }

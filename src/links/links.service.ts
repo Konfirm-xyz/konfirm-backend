@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { pool } from '../db/pool';
 import { getEffectiveFeeBps } from '../common/effective-fee';
+import { owedFee, platformFeeFloor } from '../common/money-rules';
 
 export interface CreateLinkInput {
   merchant_id: string;
@@ -48,7 +49,9 @@ export class LinksService {
     // for why QR can't carry this fee.
     if (link.amount_usdc) {
       const feeBps = await getEffectiveFeeBps(link.merchant_id);
-      link.fee_usdc = ((Number(link.amount_usdc) * feeBps) / 10_000).toFixed(7);
+      // The same rule the fee leg is built from (common/money-rules.ts), so the
+      // preview and the charge can't disagree.
+      link.fee_usdc = owedFee(String(link.amount_usdc), feeBps, platformFeeFloor());
     } else {
       link.fee_usdc = null;
     }

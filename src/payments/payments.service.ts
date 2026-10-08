@@ -6,12 +6,9 @@ import { withRetry } from '../common/retry';
 import { isAllowedOnChain } from '../common/onchain-compliance';
 import { getEffectiveFeeBps } from '../common/effective-fee';
 import { platformFeeAddress } from '../common/platform-fee';
+import { feeStroops, fromStroops, platformFeeFloor, toStroops } from '../common/money-rules';
+import { HORIZON_URL, NETWORK_PASSPHRASE } from '../common/stellar-network';
 
-// Matches NUMERIC(18,7) — the same precision links.amount_usdc/payments
-// columns already use.
-const ASSET_DECIMALS = 7;
-
-const HORIZON_URL = 'https://horizon-testnet.stellar.org';
 
 @Injectable()
 export class PaymentsService {
@@ -98,10 +95,10 @@ export class PaymentsService {
       withRetry(() => this.horizon.loadAccount(payerAddress), { retries: 2, timeoutMs: 8_000 }),
       feeBpsPromise,
     ]);
-    const feeAmount = (Number(link.amount_usdc) * feeBps) / 10_000;
+    const feeAmount = feeStroops(toStroops(String(link.amount_usdc)), feeBps, toStroops(platformFeeFloor()));
     const builder = new TransactionBuilder(payerAccount, {
       fee: BASE_FEE,
-      networkPassphrase: Networks.TESTNET,
+      networkPassphrase: NETWORK_PASSPHRASE,
     });
 
     // Stellar requires an explicit trustline before an account can hold a
@@ -133,12 +130,12 @@ export class PaymentsService {
     // operation, and no assumption that the platform fee account even
     // needs a trustline for an asset that will never actually reach it for
     // this merchant.
-    if (feeAmount > 0) {
+    if (feeAmount > 0n) {
       builder.addOperation(
         Operation.payment({
           destination: platformFeeAddress(),
           asset,
-          amount: feeAmount.toFixed(ASSET_DECIMALS),
+          amount: fromStroops(feeAmount),
         }),
       );
     }
@@ -147,7 +144,7 @@ export class PaymentsService {
 
     return {
       xdr: tx.toXDR(),
-      network_passphrase: Networks.TESTNET,
+      network_passphrase: NETWORK_PASSPHRASE,
       destination,
     };
   }
@@ -177,23 +174,25 @@ export class PaymentsService {
     }
     parts.push(`memo=${encodeURIComponent(muxedId)}`);
     parts.push(`memo_type=MEMO_ID`);
-    parts.push(`network_passphrase=${encodeURIComponent(Networks.TESTNET)}`);
+    parts.push(`network_passphrase=${encodeURIComponent(NETWORK_PASSPHRASE)}`);
 
     return { uri: `web+stellar:pay?${parts.join('&')}` };
   }
 
-  async listByMerchantAddress(stellarAddress: string) {
+  // Every status is returned, not just 'paid', so the dashboard can show a
+  // held payment with its reason. Totals should count only status = 'paid'.
+  async listForMerchant(merchantId: string) {
     const { rows } = await pool.query(
       `SELECT p.id, p.muxed_id, p.amount_usdc, p.fee_usdc, p.net_usdc,
               p.asset_code, p.payer_address, p.tx_hash, p.created_at,
+              p.status, p.flag_reason, p.fee_status, p.fee_owed_raw::text AS fee_owed_raw, p.fee_asset_code,
               l.description AS link_description
        FROM payments p
-       JOIN merchants m ON m.id = p.merchant_id
        LEFT JOIN links l ON l.id = p.link_id
-       WHERE m.stellar_base_address = $1
+       WHERE p.merchant_id = $1
        ORDER BY p.created_at DESC
        LIMIT 25`,
-      [stellarAddress],
+      [merchantId],
     );
     return rows;
   }
@@ -203,12 +202,11 @@ export class PaymentsService {
   // matching payment has landed yet. True for the handful of seconds
   // between "submitted" and "confirmed" — exactly the gap where silence
   // on the merchant's screen would read as broken rather than working.
-  async hasPendingSession(stellarAddress: string) {
+  async hasPendingSession(merchantId: string) {
     const { rows } = await pool.query(
       `SELECT ls.muxed_id, ls.created_at
        FROM link_sessions ls
-       JOIN merchants m ON m.id = ls.merchant_id
-       WHERE m.stellar_base_address = $1
+       WHERE ls.merchant_id = $1
          AND ls.created_at > NOW() - INTERVAL '3 minutes'
          AND NOT EXISTS (
            SELECT 1 FROM payments p
@@ -216,7 +214,7 @@ export class PaymentsService {
          )
        ORDER BY ls.created_at DESC
        LIMIT 1`,
-      [stellarAddress],
+      [merchantId],
     );
     return { pending: rows.length > 0, since: rows[0]?.created_at ?? null };
   }

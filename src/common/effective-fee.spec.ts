@@ -58,7 +58,7 @@ describe('getEffectiveFeeBps', () => {
   it('resolves the promo rate for a merchant with an active, within-cap promo', async () => {
     const { rows } = await pool.query(
       `INSERT INTO merchants (email, password_hash, name, fee_bps, promo_fee_bps, promo_expires_at, promo_volume_cap_usdc)
-       VALUES ($1, 'x', 'Effective Fee E2E', 10, 0, NOW() + INTERVAL '1 day', 500)
+       VALUES ($1, 'x', 'Effective Fee E2E', 10, 0, NOW() + INTERVAL '24 hours', 500)
        RETURNING id`,
       [merchantEmail],
     );

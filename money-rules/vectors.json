@@ -1,0 +1,15 @@
+{
+  "_comment": "Golden vectors for the platform fee rule, shared by konfirm-backend (src/common/money-rules.spec.ts) and the reconciler (reconciler/src/money.rs). A change to the rule must change these vectors. Amounts and fees are in asset units, as decimal strings with up to 7 decimals. fee = floor(amount * bps / 10000) to a stroop, raised to floor when the fee is positive. A zero amount or a zero rate charges nothing.",
+  "vectors": [
+    { "name": "basic 10 bps", "amount": "10", "bps": 10, "floor": "0", "fee": "0.0100000" },
+    { "name": "rounds down, never up", "amount": "0.0000019", "bps": 10, "floor": "0", "fee": "0.0000000" },
+    { "name": "fractional stroop truncates", "amount": "1", "bps": 3, "floor": "0", "fee": "0.0003000" },
+    { "name": "zero rate charges nothing", "amount": "100", "bps": 0, "floor": "0", "fee": "0.0000000" },
+    { "name": "zero amount charges nothing", "amount": "0", "bps": 100, "floor": "0.05", "fee": "0.0000000" },
+    { "name": "large amount, fraction dropped", "amount": "1234.5678901", "bps": 1, "floor": "0", "fee": "0.1234567" },
+    { "name": "floor applies to a small fee", "amount": "0.01", "bps": 100, "floor": "0.05", "fee": "0.0500000" },
+    { "name": "floor does not reduce a larger fee", "amount": "10", "bps": 100, "floor": "0.05", "fee": "0.1000000" },
+    { "name": "exact floor boundary", "amount": "5", "bps": 100, "floor": "0.05", "fee": "0.0500000" },
+    { "name": "one stroop above the floor boundary", "amount": "5.0000001", "bps": 100, "floor": "0.05", "fee": "0.0500000" }
+  ]
+}
