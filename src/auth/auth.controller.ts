@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, Post, Req, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Logger, Post, Req, Res, UseGuards } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import type { Response } from 'express';
 import { z } from 'zod';
@@ -9,10 +9,23 @@ import { AuthedRequest, AuthGuard, SESSION_COOKIE } from './auth.guard';
 // Password-guessing and account-creation-spam both live here — 10/min per
 // IP is generous for a real user, punishing for a script.
 const AUTH_THROTTLE = { default: { limit: 10, ttl: 60_000 } };
+// Reset requests send real email, so they get a tighter ceiling than login.
+const FORGOT_THROTTLE = { default: { limit: 5, ttl: 60_000 } };
+
+// bcrypt only uses the first 72 bytes of a password. Anything past that is
+// ignored silently, so cap it here instead of letting users think a longer
+// passphrase is stronger than it is. Counted in bytes, not characters.
+const passwordSchema = z
+  .string()
+  .min(8, 'password must be at least 8 characters')
+  .refine((p) => Buffer.byteLength(p, 'utf8') <= 72, 'password must be 72 bytes or fewer');
+
+// Emails are normalised to lowercase (see auth.service.ts normalizeEmail).
+const emailSchema = z.string().trim().toLowerCase().email();
 
 const signupSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(8, 'password must be at least 8 characters'),
+  email: emailSchema,
+  password: passwordSchema,
   name: z.string().min(1).max(200),
   // Stellar strkey account id — base32, no checksum validation here; a
   // malformed address fails loudly the first time a payout is attempted,
@@ -25,8 +38,17 @@ const signupSchema = z.object({
 });
 
 const loginSchema = z.object({
-  email: z.string().email(),
+  email: emailSchema,
   password: z.string().min(1),
+});
+
+const forgotPasswordSchema = z.object({
+  email: emailSchema,
+});
+
+const resetPasswordSchema = z.object({
+  token: z.string().min(20).max(200),
+  password: passwordSchema,
 });
 
 // 30 days, matching the JWT's own expiry in auth.service.ts.
@@ -34,6 +56,8 @@ const COOKIE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 
 @Controller('auth')
 export class AuthController {
+  private readonly logger = new Logger(AuthController.name);
+
   constructor(private readonly auth: AuthService) {}
 
   @Post('signup')
@@ -63,6 +87,29 @@ export class AuthController {
     const { token, merchant } = await this.auth.login(body.email, body.password);
     this.setSessionCookie(res, token);
     return { merchant };
+  }
+
+  // Always the same response, whether or not the email has an account. A
+  // mail failure is logged server-side and not shown to the caller, because
+  // showing it would tell an attacker the address was real.
+  @Post('forgot-password')
+  @HttpCode(200)
+  @Throttle(FORGOT_THROTTLE)
+  async forgotPassword(@Body(new ZodValidationPipe(forgotPasswordSchema)) body: z.infer<typeof forgotPasswordSchema>) {
+    try {
+      await this.auth.requestPasswordReset(body.email);
+    } catch (err) {
+      this.logger.error(`password reset email failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return { ok: true };
+  }
+
+  @Post('reset-password')
+  @HttpCode(200)
+  @Throttle(AUTH_THROTTLE)
+  async resetPassword(@Body(new ZodValidationPipe(resetPasswordSchema)) body: z.infer<typeof resetPasswordSchema>) {
+    await this.auth.resetPassword(body.token, body.password);
+    return { ok: true };
   }
 
   @Post('logout')

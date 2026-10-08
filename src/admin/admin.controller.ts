@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { z } from 'zod';
 import { ZodValidationPipe } from '../zod-validation.pipe';
 import { AdminGuard, AuthedAdminRequest } from '../admin-auth/admin-auth.guard';
@@ -21,6 +21,11 @@ import { AdminExchangeRateService } from './admin-exchange-rate.service';
 import { AdminReferralsService } from './admin-referrals.service';
 import { AdminBazaarService } from './admin-bazaar.service';
 import { FacilitatorSpendGuardService } from '../facilitator/facilitator-spend-guard.service';
+import { AuthService } from '../auth/auth.service';
+
+const passwordResetSchema = z.object({
+  reason: z.string().min(3).max(500),
+});
 
 const setMerchantStatusSchema = z.object({
   status: z.enum(['active', 'suspended']),
@@ -51,10 +56,13 @@ const setBazaarListingStatusSchema = z.object({
 });
 
 // One controller for the whole admin resource surface rather than one per
-// domain — ~25 endpoints across 5 resources doesn't need 5 separate
-// module/controller/service triads to stay readable; splitting further
-// would be ceremony, not clarity. Each resource still gets its own service
-// for testability.
+// domain. This has grown past the "5 resources" this comment used to say —
+// it's 18 services and ~30 routes now — but the reason still holds: every
+// route is a one- or two-line delegation to its own service plus an audit
+// log call, so the controller stays a thin router, not a place logic
+// accumulates. If a resource ever needs route-level middleware or guards
+// its neighbors don't, that's the signal to split it out, not the line
+// count alone. Each resource still gets its own service for testability.
 @Controller('admin')
 @UseGuards(AdminGuard)
 export class AdminController {
@@ -78,6 +86,7 @@ export class AdminController {
     private readonly referrals: AdminReferralsService,
     private readonly bazaar: AdminBazaarService,
     private readonly facilitatorSpendGuard: FacilitatorSpendGuardService,
+    private readonly auth: AuthService,
   ) {}
 
   @Get('stats')
@@ -90,6 +99,22 @@ export class AdminController {
   @Get('merchants')
   listMerchants(@Query('limit') limit?: string, @Query('offset') offset?: string) {
     return this.merchants.list(limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
+  }
+
+  // For a merchant who has lost their password. Sends the same emailed link
+  // the self-service flow does, and records who asked and why. Admins never
+  // see or set the password.
+  @Post('merchants/:id/password-reset')
+  @HttpCode(200)
+  async sendMerchantPasswordReset(
+    @Param('id') id: string,
+    @Body(new ZodValidationPipe(passwordResetSchema)) body: z.infer<typeof passwordResetSchema>,
+    @Req() req: AuthedAdminRequest,
+  ) {
+    const email = await this.merchants.emailForPasswordReset(id);
+    await this.auth.requestPasswordReset(email);
+    await this.actions.log(req.admin.id, 'merchant.password-reset-sent', 'merchant', id, { reason: body.reason });
+    return { ok: true };
   }
 
   @Patch('merchants/:id/status')

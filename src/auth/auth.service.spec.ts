@@ -7,7 +7,7 @@ import { AuthService } from './auth.service';
 // standing in for the one thing (a merchant's credentials) that actually
 // matters to get right.
 describe('AuthService (integration, real Postgres)', () => {
-  const auth = new AuthService();
+  const auth = new AuthService({ send: async () => undefined });
   const testEmails: string[] = [];
 
   function freshEmail(): string {

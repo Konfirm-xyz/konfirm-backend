@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { AdminAuthModule } from '../admin-auth/admin-auth.module';
+import { AuthModule } from '../auth/auth.module';
 import { WithdrawalsModule } from '../withdrawals/withdrawals.module';
 import { FacilitatorModule } from '../facilitator/facilitator.module';
 import { AdminController } from './admin.controller';
@@ -23,7 +24,7 @@ import { AdminReferralsService } from './admin-referrals.service';
 import { AdminBazaarService } from './admin-bazaar.service';
 
 @Module({
-  imports: [AdminAuthModule, WithdrawalsModule, FacilitatorModule],
+  imports: [AdminAuthModule, AuthModule, WithdrawalsModule, FacilitatorModule],
   controllers: [AdminController],
   providers: [
     AdminMerchantsService,

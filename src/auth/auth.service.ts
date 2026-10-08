@@ -1,17 +1,33 @@
-import { ConflictException, ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, Logger, UnauthorizedException } from '@nestjs/common';
+import { createHash, randomBytes } from 'node:crypto';
 import * as bcrypt from 'bcryptjs';
 import * as jwt from 'jsonwebtoken';
 import { pool } from '../db/pool';
+import { assertDistinctSecrets, resolveSessionSecret } from '../common/secrets';
+import { MAILER, Mailer } from '../mail/mailer';
 
-// A dev fallback keeps `npm start` working out of the box, but it's loud
-// about it rather than silently signing real sessions with a guessable key
-// — the same fail-open-but-never-silent pattern the compliance check uses.
-const JWT_SECRET = process.env.JWT_SECRET ?? (() => {
-  // eslint-disable-next-line no-console
-  console.warn('[auth] JWT_SECRET not set — using an insecure dev-only default. Set JWT_SECRET before this ever leaves localhost.');
-  return 'dev-only-insecure-secret-change-me';
-})();
+// Production refuses to start without a real secret — see common/secrets.ts.
+const JWT_SECRET = resolveSessionSecret('JWT_SECRET', 'dev-only-insecure-secret-change-me');
+assertDistinctSecrets(JWT_SECRET, resolveSessionSecret('ADMIN_JWT_SECRET', 'dev-only-insecure-admin-secret-change-me', process.env, () => undefined), ['JWT_SECRET', 'ADMIN_JWT_SECRET']);
 const TOKEN_TTL = '30d';
+
+// Reset links are short-lived and single-use. Only a hash is stored.
+const RESET_TTL_MINUTES = 30;
+
+// Compared against when an email has no account, so a login for an unknown
+// address takes as long as one for a real account. Otherwise the timing
+// reveals which emails are registered.
+const DUMMY_PASSWORD_HASH = bcrypt.hashSync('timing-equaliser-not-a-real-password', 10);
+
+// Emails are stored lowercase (see migration 021). Trimming and lowercasing
+// on every entry point means "Alice@x.com" finds the same account.
+export function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
+
+function sha256(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
 
 // A referred merchant's onboarding trial — removes the biggest friction
 // point in trying a new payment processor (paying real fees before you
@@ -28,6 +44,8 @@ export interface MerchantClaims {
   email: string;
   name: string;
   stellar_base_address: string | null;
+  // Bumped on password reset. Tokens issued before a reset stop working.
+  sv?: number;
 }
 
 // Excludes 0/O/1/I — ambiguous when read aloud or typed from memory, which
@@ -45,6 +63,10 @@ function randomReferralCode(): string {
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
+  constructor(@Inject(MAILER) private readonly mailer: Mailer) {}
+
   async signup(
     email: string,
     password: string,
@@ -52,6 +74,7 @@ export class AuthService {
     stellarBaseAddress: string,
     referralCode?: string,
   ): Promise<{ token: string; merchant: MerchantClaims }> {
+    email = normalizeEmail(email);
     const existing = await pool.query('SELECT id FROM merchants WHERE email = $1', [email]);
     if (existing.rows.length > 0) {
       throw new ConflictException('an account with this email already exists');
@@ -92,7 +115,7 @@ export class AuthService {
       ]);
     }
 
-    return { token: this.issueToken(merchant), merchant };
+    return { token: this.issueToken(merchant, 0), merchant };
   }
 
   // Astronomically unlikely to collide at this alphabet/length (32^8), but
@@ -110,13 +133,18 @@ export class AuthService {
 
   async login(email: string, password: string): Promise<{ token: string; merchant: MerchantClaims }> {
     const { rows } = await pool.query(
-      'SELECT id, email, name, stellar_base_address, password_hash, status FROM merchants WHERE email = $1',
-      [email],
+      'SELECT id, email, name, stellar_base_address, password_hash, status, session_version FROM merchants WHERE email = $1',
+      [normalizeEmail(email)],
     );
     // Same generic error whether the email doesn't exist or the password is
     // wrong — telling them apart lets an attacker enumerate real accounts.
     const invalid = () => new UnauthorizedException('invalid email or password');
-    if (rows.length === 0) throw invalid();
+    if (rows.length === 0) {
+      // Do the same bcrypt work as for a real account, so timing doesn't
+      // reveal which emails are registered.
+      await bcrypt.compare(password, DUMMY_PASSWORD_HASH);
+      throw invalid();
+    }
 
     const row = rows[0];
     const ok = await bcrypt.compare(password, row.password_hash);
@@ -134,7 +162,64 @@ export class AuthService {
       name: row.name,
       stellar_base_address: row.stellar_base_address,
     };
-    return { token: this.issueToken(merchant), merchant };
+    return { token: this.issueToken(merchant, row.session_version), merchant };
+  }
+
+  // Sends a reset link if the email belongs to an active account. Callers
+  // must return the same response either way: this method says nothing to
+  // the caller about whether an account exists.
+  async requestPasswordReset(rawEmail: string): Promise<void> {
+    const email = normalizeEmail(rawEmail);
+    const { rows } = await pool.query(`SELECT id FROM merchants WHERE email = $1 AND status = 'active'`, [email]);
+    if (rows.length === 0) return;
+    const merchantId = rows[0].id;
+
+    const appUrl = process.env.APP_URL ?? 'http://localhost:3000';
+    if (process.env.NODE_ENV === 'production' && !process.env.APP_URL) {
+      throw new Error('APP_URL must be set in production to build reset links');
+    }
+
+    // Only one live link at a time: a new request invalidates older ones.
+    await pool.query('UPDATE password_reset_tokens SET used_at = NOW() WHERE merchant_id = $1 AND used_at IS NULL', [merchantId]);
+
+    const token = randomBytes(32).toString('base64url');
+    await pool.query(
+      `INSERT INTO password_reset_tokens (merchant_id, token_hash, expires_at)
+       VALUES ($1, $2, NOW() + ($3 * INTERVAL '1 minute'))`,
+      [merchantId, sha256(token), RESET_TTL_MINUTES],
+    );
+
+    await this.mailer.send({
+      to: email,
+      subject: 'Reset your Konfirm password',
+      text:
+        `Use this link to choose a new password:\n\n${appUrl}/reset-password?token=${token}\n\n` +
+        `The link expires in ${RESET_TTL_MINUTES} minutes and works once. ` +
+        `If you didn't ask for this, ignore this email; your password hasn't changed.`,
+    });
+  }
+
+  // Single-use: the token is consumed by the same UPDATE that checks it, so
+  // two concurrent submissions can't both succeed. A successful reset bumps
+  // session_version, which signs out every existing session.
+  async resetPassword(token: string, newPassword: string): Promise<void> {
+    const { rows } = await pool.query(
+      `UPDATE password_reset_tokens SET used_at = NOW()
+       WHERE token_hash = $1 AND used_at IS NULL AND expires_at > NOW()
+       RETURNING merchant_id`,
+      [sha256(token)],
+    );
+    if (rows.length === 0) {
+      throw new BadRequestException('this reset link is invalid or has expired — request a new one');
+    }
+    const merchantId = rows[0].merchant_id;
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+    await pool.query(
+      `UPDATE merchants SET password_hash = $2, session_version = session_version + 1, updated_at = NOW() WHERE id = $1`,
+      [merchantId, passwordHash],
+    );
+    await pool.query('UPDATE password_reset_tokens SET used_at = NOW() WHERE merchant_id = $1 AND used_at IS NULL', [merchantId]);
+    this.logger.log(`password reset completed for merchant ${merchantId}`);
   }
 
   // "Activated" is computed here (EXISTS a paid payment), not stored — see
@@ -199,9 +284,15 @@ export class AuthService {
     }
   }
 
-  private issueToken(merchant: MerchantClaims): string {
+  private issueToken(merchant: MerchantClaims, sessionVersion: number): string {
     return jwt.sign(
-      { id: merchant.id, email: merchant.email, name: merchant.name, stellar_base_address: merchant.stellar_base_address },
+      {
+        id: merchant.id,
+        email: merchant.email,
+        name: merchant.name,
+        stellar_base_address: merchant.stellar_base_address,
+        sv: sessionVersion,
+      },
       JWT_SECRET,
       { expiresIn: TOKEN_TTL },
     );
