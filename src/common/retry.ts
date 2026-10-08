@@ -23,12 +23,7 @@ export async function withRetry<T>(fn: () => Promise<T>, opts: RetryOptions = {}
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      return await Promise.race([
-        fn(),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error(`external call timed out after ${timeoutMs}ms`)), timeoutMs),
-        ),
-      ]);
+      return await withTimeout(fn(), timeoutMs);
     } catch (err) {
       lastErr = err;
       if (attempt < retries) {
@@ -63,4 +58,15 @@ export async function fetchWithRetry(
     },
     { ...opts, timeoutMs: timeoutMs + 1_000 }, // outer race is just a backstop; AbortSignal does the real cancelling
   );
+}
+
+// Rejects if `p` hasn't settled within `ms`. The timer is cleared once `p`
+// settles either way: a leftover timer keeps the process alive for its full
+// length, which is why the test suite used to hang on exit.
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`external call timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
 }

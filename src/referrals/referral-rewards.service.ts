@@ -48,7 +48,7 @@ export class ReferralRewardsService {
         await pool.query(
           `UPDATE merchants
            SET promo_fee_bps = GREATEST(FLOOR(fee_bps / $2), 0),
-               promo_expires_at = NOW() + ($3 * INTERVAL '1 day'),
+               promo_expires_at = NOW() + ($3 * INTERVAL '24 hours'),
                promo_volume_cap_usdc = NULL
            WHERE id = $1`,
           [referrerId, REWARD_DISCOUNT_DIVISOR, REWARD_DAYS],
