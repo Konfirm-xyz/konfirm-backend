@@ -1,0 +1,42 @@
+services:
+  - type: web
+    name: konfirm-backend-api
+    runtime: node
+    plan: free
+    region: oregon
+    branch: main
+    buildCommand: npm ci
+    startCommand: npm run migrate:up && npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: konfirm-db
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: ADMIN_JWT_SECRET
+        generateValue: true
+      - key: STELLAR_NETWORK
+        value: testnet
+      - key: ENABLE_TESTNET_FAUCET
+        value: "false"
+      - key: APP_URL
+        sync: false
+      # Facilitator must be its own key, never the deployer's — see docs/KEYS.md.
+      # No safe default exists for any of these three; generate real testnet
+      # keypairs and paste the secrets in via the Render dashboard, not here.
+      - key: FACILITATOR_SECRET_KEY
+        sync: false
+      - key: STELLAR_DEPLOYER_SECRET_KEY
+        sync: false
+      - key: PLATFORM_FEE_SECRET_KEY
+        sync: false
+      - key: SENTRY_DSN
+        sync: false
+
+databases:
+  - name: konfirm-db
+    plan: free
+    region: oregon

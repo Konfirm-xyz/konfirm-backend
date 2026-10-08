@@ -515,6 +515,23 @@ policy relaunches it — same safety net `while true; do cargo run -- watch ...;
 
 See `.env.example` for the complete list of environment variables to set on each service.
 
+### Render (the `api` service only)
+
+`render.yaml` at repo root is a Blueprint for just the `api` service plus a managed Postgres —
+Render's free tier doesn't offer background workers or cron jobs, so the `reconciler` and backup
+cron still need Railway (or any host that supports a long-running process) until that changes.
+This is meant for getting the API itself reachable quickly — a live checkout flow needs the
+reconciler too, but login, link creation, and the admin pages all work against `api` alone.
+
+Render auto-detects `render.yaml` when you connect the repo: **New +** → **Blueprint** → pick
+`Konfirm-xyz/konfirm-backend`. It provisions the free Postgres and the web service, generates
+`JWT_SECRET`/`ADMIN_JWT_SECRET`, and runs `npm run migrate:up` before every start. Four values are
+marked `sync: false` in the blueprint and need to be pasted in by hand on the Render dashboard
+before the first deploy will boot cleanly: `APP_URL` (the Vercel frontend's URL),
+`FACILITATOR_SECRET_KEY`, `STELLAR_DEPLOYER_SECRET_KEY`, and `PLATFORM_FEE_SECRET_KEY` — see [Keys](docs/KEYS.md) for what each one is. Render deletes its free
+Postgres databases 30 days after creation, unconditionally, not just on inactivity — treat this as
+a demo/pilot deployment, not the long-term home for real merchant data.
+
 ### What only a human can do here
 
 I don't have credentials for any of this — these steps need to be done directly, not asked for:
