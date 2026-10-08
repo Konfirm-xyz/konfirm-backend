@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
 import { APP_FILTER, APP_GUARD } from '@nestjs/core';
 import { ScheduleModule } from '@nestjs/schedule';
+import { ReconcilerWatchdogService } from './observability/reconciler-watchdog.service';
+import { FeesModule } from './fees/fees.module';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { LoggerModule } from 'nestjs-pino';
 import { AllExceptionsFilter } from './observability/all-exceptions.filter';
@@ -42,7 +44,8 @@ const isProd = process.env.NODE_ENV === 'production';
         // suppresses the routine, expected, high-frequency success case.
         autoLogging: {
           ignore: (req) =>
-            /\/payments\/(by-merchant|pending-by-merchant)\//.test(req.url ?? '') ||
+            /\/payments\/mine/.test(req.url ?? '') ||
+            /\/links\/[^/]+\/sessions\/\d+/.test(req.url ?? '') ||
             /\/(withdrawals|deposits)\/status/.test(req.url ?? ''),
         },
       },
@@ -69,8 +72,10 @@ const isProd = process.env.NODE_ENV === 'production';
     ReferralsModule,
     FacilitatorModule,
     BazaarModule,
+    FeesModule,
   ],
   providers: [
+    ReconcilerWatchdogService,
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
   ],

@@ -1,13 +1,14 @@
-import { BadRequestException, Controller, Get, Param, Query } from '@nestjs/common';
+import { BadRequestException, Controller, Get, Query, Req, UseGuards } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
+import { AuthedRequest, AuthGuard } from '../auth/auth.guard';
 import { PaymentsService } from './payments.service';
 
 @Controller('payments')
 export class PaymentsController {
   constructor(private readonly payments: PaymentsService) {}
 
-  // Shells out to the `stellar` CLI (compliance check) and calls Horizon —
-  // both real external processes/services, not a cheap DB read. 20/min per
+  // Calls Horizon and the compliance contract over Soroban RPC — real
+  // external services, not a cheap DB read. 20/min per
   // IP is far more than a real checkout attempt ever needs.
   @Get('prepare-tx')
   @Throttle({ default: { limit: 20, ttl: 60_000 } })
@@ -30,13 +31,20 @@ export class PaymentsController {
     return this.payments.buildPayUri(linkId, muxedId);
   }
 
-  @Get('by-merchant/:stellarAddress')
-  listByMerchant(@Param('stellarAddress') stellarAddress: string) {
-    return this.payments.listByMerchantAddress(stellarAddress);
+  // Merchant-scoped by session, never by a Stellar address in the URL. The
+  // old /by-merchant/:address routes returned any merchant's sales to anyone
+  // who knew their address. The checkout page's per-payment check moved to
+  // GET /links/:linkId/sessions/:muxedId, which only ever shows that one
+  // payer's own payment.
+  @Get('mine')
+  @UseGuards(AuthGuard)
+  listMine(@Req() req: AuthedRequest) {
+    return this.payments.listForMerchant(req.merchant.id);
   }
 
-  @Get('pending-by-merchant/:stellarAddress')
-  pendingByMerchant(@Param('stellarAddress') stellarAddress: string) {
-    return this.payments.hasPendingSession(stellarAddress);
+  @Get('mine/pending')
+  @UseGuards(AuthGuard)
+  pendingMine(@Req() req: AuthedRequest) {
+    return this.payments.hasPendingSession(req.merchant.id);
   }
 }

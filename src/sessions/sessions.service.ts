@@ -3,6 +3,31 @@ import { pool } from '../db/pool';
 
 @Injectable()
 export class SessionsService {
+  // Whether the payer's own session has landed. Deliberately narrow: this
+  // says "received" and gives that payment's amount and tx hash. It does not
+  // expose status or flags, and it never reveals any other payment.
+  async statusFor(linkId: string, muxedId: string) {
+    const { rows } = await pool.query(
+      `SELECT p.amount_usdc, p.asset_code, p.tx_hash, p.created_at
+       FROM link_sessions ls
+       LEFT JOIN payments p ON p.merchant_id = ls.merchant_id AND p.muxed_id = ls.muxed_id
+       WHERE ls.link_id = $1 AND ls.muxed_id = $2`,
+      [linkId, muxedId],
+    );
+    if (rows.length === 0) throw new NotFoundException('session not found');
+    const row = rows[0];
+    if (!row.tx_hash) return { confirmed: false, payment: null };
+    return {
+      confirmed: true,
+      payment: {
+        amount_usdc: row.amount_usdc,
+        asset_code: row.asset_code,
+        tx_hash: row.tx_hash,
+        created_at: row.created_at,
+      },
+    };
+  }
+
   // This is the one server round trip §1 says is unavoidable — compliance
   // screening has to happen here in the real build. What it does today:
   // reserve the client-derived muxed_id against this Link, so the reconciler
