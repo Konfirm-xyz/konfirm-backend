@@ -35,4 +35,23 @@ export class AdminReconcilerService {
     );
     return { previous: current, ...updated[0] };
   }
+
+  async listSkippedOps(status?: string) {
+    if (status) {
+      const { rows } = await pool.query(
+        `SELECT id, merchant_id, paging_token, tx_hash, raw_payload, error_message, failure_count, status, created_at
+         FROM reconciler_skipped_ops
+         WHERE status = $1
+         ORDER BY created_at DESC`,
+        [status],
+      );
+      return rows;
+    }
+    const { rows } = await pool.query(
+      `SELECT id, merchant_id, paging_token, tx_hash, raw_payload, error_message, failure_count, status, created_at
+       FROM reconciler_skipped_ops
+       ORDER BY created_at DESC`,
+    );
+    return rows;
+  }
 }

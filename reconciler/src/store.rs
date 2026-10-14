@@ -330,6 +330,41 @@ impl Store {
         Ok(())
     }
 
+    /// Persists a permanently malformed / poison-pill payment operation to
+    /// `reconciler_skipped_ops` before advancing the merchant's cursor past
+    /// it (issue #44). Idempotent on `(merchant_id, paging_token)` so a crash
+    /// between this insert and the cursor advance safely updates the existing
+    /// review row on replay.
+    pub async fn record_skipped_op(
+        &self,
+        merchant_id: Uuid,
+        paging_token: &str,
+        tx_hash: &str,
+        raw_payload: Option<&str>,
+        error_message: &str,
+        failure_count: i32,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO reconciler_skipped_ops
+                (merchant_id, paging_token, tx_hash, raw_payload, error_message, failure_count, status)
+             VALUES ($1, $2, $3, $4, $5, $6, 'pending_review')
+             ON CONFLICT (merchant_id, paging_token)
+             DO UPDATE SET
+                error_message = excluded.error_message,
+                failure_count = excluded.failure_count,
+                raw_payload = COALESCE(excluded.raw_payload, reconciler_skipped_ops.raw_payload)",
+        )
+        .bind(merchant_id)
+        .bind(paging_token)
+        .bind(tx_hash)
+        .bind(raw_payload)
+        .bind(error_message)
+        .bind(failure_count)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// One-time migration helper, not a schema migration: carries the old
     /// single global `'cursor'` row forward as *one specific* merchant's
     /// starting point, the one that was actually being watched under the

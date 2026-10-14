@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
 // The /payments endpoint is misleadingly named — it actually returns every
@@ -15,13 +15,13 @@ use std::str::FromStr;
 // addresses because Freighter's wallet extension has open bugs decoding
 // muxed accounts in its own sign-confirmation UI (stellar/freighter#2841,
 // #2856, #2863); a plain destination + memo is universally supported.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct EmbeddedTransaction {
     pub memo: Option<String>,
     pub memo_type: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct PaymentOp {
     pub id: String,
     pub paging_token: String,

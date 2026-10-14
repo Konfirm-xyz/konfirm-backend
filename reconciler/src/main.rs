@@ -178,6 +178,7 @@ async fn watch(merchant_address: &str, max_polls: u32, interval_secs: u64) -> Re
             &mut cursor,
             &cursor_key,
             &mut pending_checks,
+            None,
         )
         .await?;
         found_any = found_any || found;
@@ -314,9 +315,21 @@ async fn watch_merchant_supervised(store: Store, merchant_id: Uuid, merchant_add
     }
 
     let mut pending_checks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    let mut failure_tracker = OpFailureTracker::new(MAX_CONSECUTIVE_OP_FAILURES);
 
     loop {
-        match poll_once(&horizon, &store, &merchant, &merchant_address, &mut cursor, &cursor_key, &mut pending_checks).await {
+        match poll_once(
+            &horizon,
+            &store,
+            &merchant,
+            &merchant_address,
+            &mut cursor,
+            &cursor_key,
+            &mut pending_checks,
+            Some(&mut failure_tracker),
+        )
+        .await
+        {
             Ok(_found) => {
                 // watch-all runs indefinitely, unlike watch()'s bounded
                 // run which only ever drains this Vec once at the very
@@ -334,6 +347,50 @@ async fn watch_merchant_supervised(store: Store, merchant_id: Uuid, merchant_add
     }
 }
 
+pub const MAX_CONSECUTIVE_OP_FAILURES: u32 = 3;
+
+/// Tracks consecutive processing failures on the *same* Horizon `paging_token`
+/// for a single merchant cursor in `watch-all` (issue #44).
+///
+/// Transient failures (< `max_failures`) return `should_skip = false` so the
+/// supervisor loop backs off and retries normally without advancing the cursor.
+/// Once the exact same `paging_token` fails `max_failures` times in a row,
+/// `should_skip = true` signals `poll_once` to record the poison-pill op to
+/// `reconciler_skipped_ops`, emit a loud error alert, and advance the cursor
+/// past it so subsequent payments for that merchant are not blocked forever.
+#[derive(Debug, Clone)]
+pub struct OpFailureTracker {
+    failed_paging_token: Option<String>,
+    consecutive_failures: u32,
+    max_failures: u32,
+}
+
+impl OpFailureTracker {
+    pub fn new(max_failures: u32) -> Self {
+        Self {
+            failed_paging_token: None,
+            consecutive_failures: 0,
+            max_failures: max_failures.max(1),
+        }
+    }
+
+    pub fn record_success(&mut self) {
+        self.failed_paging_token = None;
+        self.consecutive_failures = 0;
+    }
+
+    pub fn record_failure(&mut self, paging_token: &str) -> (u32, bool) {
+        if self.failed_paging_token.as_deref() == Some(paging_token) {
+            self.consecutive_failures += 1;
+        } else {
+            self.failed_paging_token = Some(paging_token.to_string());
+            self.consecutive_failures = 1;
+        }
+        let should_skip = self.consecutive_failures >= self.max_failures;
+        (self.consecutive_failures, should_skip)
+    }
+}
+
 // One polling pass for one merchant: fetch whatever's new since `cursor`,
 // process each payment op, advance and persist `cursor` via `cursor_key` as
 // each op is handled. Extracted so watch() (bounded, single merchant) and
@@ -348,6 +405,7 @@ async fn poll_once(
     cursor: &mut String,
     cursor_key: &CursorKey,
     pending_checks: &mut Vec<tokio::task::JoinHandle<()>>,
+    mut failure_tracker: Option<&mut OpFailureTracker>,
 ) -> Result<bool> {
     let ops = horizon.payments_since(merchant_address, cursor, 50).await?;
     let mut found_any = false;
@@ -361,6 +419,9 @@ async fn poll_once(
 
     for op in &ops {
         if op.op_type != "payment" {
+            if let Some(tracker) = failure_tracker.as_deref_mut() {
+                tracker.record_success();
+            }
             *cursor = op.paging_token.clone();
             continue;
         }
@@ -387,217 +448,284 @@ async fn poll_once(
 
         let Some(muxed_id) = muxed_id else {
             tracing::warn!(paging_token = %op.paging_token, "payment carries no session memo or muxed destination — recording unmatched");
+            if let Some(tracker) = failure_tracker.as_deref_mut() {
+                tracker.record_success();
+            }
             *cursor = op.paging_token.clone();
             continue;
         };
 
-        let (asset_code, asset_issuer): (String, Option<String>) = match op.asset_type.as_deref() {
-            Some("native") => ("XLM".to_string(), None),
-            _ => (
-                op.asset_code.clone().unwrap_or_default(),
-                op.asset_issuer.clone(),
-            ),
-        };
-        let payer = op.from.clone().unwrap_or_default();
-        let raw_amount = op.amount.as_deref().unwrap_or("0");
-        let muxed_address = op.to_muxed.clone().unwrap_or_else(|| op.to.clone().unwrap_or_default());
-
-        // amount_usdc/fee_usdc/net_usdc are meant to be USD-equivalent
-        // regardless of what asset was actually sent — asset_code/
-        // asset_issuer already preserve the real audit trail of what
-        // was paid, so converting here doesn't lose that information.
-        let applied_rate: Option<rust_decimal::Decimal> = if asset_code == "XLM" {
-            Some(match xlm_usdc_rate {
-                Some(r) => r,
-                None => {
-                    let r = horizon.xlm_usdc_rate(&usdc_issuer()).await?;
-                    xlm_usdc_rate = Some(r);
-                    r
+        match process_payment_op(
+            horizon,
+            store,
+            merchant,
+            op,
+            muxed_id,
+            &mut xlm_usdc_rate,
+            &mut eurc_usdc_rate,
+            pending_checks,
+        )
+        .await
+        {
+            Ok(matched) => {
+                found_any = found_any || matched;
+                if let Some(tracker) = failure_tracker.as_deref_mut() {
+                    tracker.record_success();
                 }
-            })
-        } else if asset_code == "EURC" {
-            Some(match eurc_usdc_rate {
-                Some(r) => r,
-                None => {
-                    let r = horizon.eurc_usdc_rate(&eurc_issuer(), &usdc_issuer()).await?;
-                    eurc_usdc_rate = Some(r);
-                    r
-                }
-            })
-        } else {
-            None
-        };
-        let usd_amount: String = match applied_rate {
-            Some(rate) => {
-                let raw: rust_decimal::Decimal = raw_amount.parse().context("horizon returned a non-decimal XLM amount")?;
-                (raw * rate).to_string()
+                // Advance only after the record is durably committed above — never
+                // before. A crash between insert and this line just reprocesses
+                // the same op next run, which record_payment_if_new makes a safe
+                // no-op.
+                *cursor = op.paging_token.clone();
+                cursor_key.set(store, cursor).await?;
             }
-            None => raw_amount.to_string(),
-        };
-
-        // Additive fee collection means the merchant's own leg above
-        // (usd_amount) is untouched — it's exactly what the merchant
-        // received, same as before this feature existed. The fee itself
-        // is a *separate* payment operation, in the same transaction, to
-        // PLATFORM_FEE_ADDRESS — invisible to payments_since's per-account
-        // feed since it never touches the merchant's address at all. Only
-        // look for it when a fee is actually expected, to avoid a Horizon
-        // round trip on every single payment.
-        let expected_fee_bps = store.effective_fee_bps(merchant).await?;
-        let (fee_usdc, fee_paging_token): (rust_decimal::Decimal, Option<String>) = if expected_fee_bps > 0 {
-            match platform_fee_address() {
-                Some(fee_address) => {
-                    let sibling_ops = horizon.operations_for_transaction(&op.transaction_hash).await?;
-                    let fee_op = sibling_ops.iter().find(|o| {
-                        if o.op_type != "payment" || o.to.as_deref() != Some(fee_address.as_str()) {
-                            return false;
-                        }
-                        let (sibling_code, sibling_issuer): (&str, Option<&str>) = match o.asset_type.as_deref() {
-                            Some("native") => ("XLM", None),
-                            _ => (o.asset_code.as_deref().unwrap_or(""), o.asset_issuer.as_deref()),
-                        };
-                        sibling_code == asset_code && sibling_issuer == asset_issuer.as_deref()
-                    });
-                    match fee_op {
-                        Some(fee_op) => {
-                            let raw_fee: rust_decimal::Decimal = fee_op
-                                .amount
-                                .as_deref()
-                                .unwrap_or("0")
-                                .parse()
-                                .context("horizon returned a non-decimal fee amount")?;
-                            let fee_usd = match applied_rate {
-                                Some(rate) => raw_fee * rate,
-                                None => raw_fee,
-                            };
-                            (fee_usd, Some(fee_op.paging_token.clone()))
-                        }
-                        None => {
-                            tracing::warn!(
-                                tx_hash = %op.transaction_hash,
-                                merchant_id = %merchant.id,
-                                expected_fee_bps,
-                                "expected a platform fee leg but found none in this transaction"
-                            );
-                            (rust_decimal::Decimal::ZERO, None)
-                        }
-                    }
-                }
-                None => (rust_decimal::Decimal::ZERO, None),
-            }
-        } else {
-            (rust_decimal::Decimal::ZERO, None)
-        };
-
-        // Checked against the session's link before anything is written, so a
-        // payment that doesn't match what was asked for lands as 'held' with
-        // a reason. A fee that was expected but absent is flagged, not held:
-        // the merchant was paid in full.
-        let raw_paid: rust_decimal::Decimal = raw_amount.parse().context("horizon returned a non-decimal payment amount")?;
-        let link = store.link_expectation(merchant.id, muxed_id as i64).await?;
-        let verdict_issuer = asset_issuer.as_deref();
-        let verdict = verdict::assess(link.as_ref(), raw_paid, &asset_code, verdict_issuer);
-
-        // Fee status (docs/design/qr-fee-collection.md, Option B). A fee leg
-        // on-chain means collected. Without it, the fee is owed by the merchant,
-        // in the payment's own asset, rounded down to a stroop so it never asks
-        // for more than the merchant owes. A deployment without a fee account
-        // collects no fee, so nothing is owed.
-        let (fee_status, fee_owed_raw, fee_usdc): (&str, Option<rust_decimal::Decimal>, rust_decimal::Decimal) =
-            if expected_fee_bps == 0 || platform_fee_address().is_none() {
-                ("none", None, rust_decimal::Decimal::ZERO)
-            } else if fee_paging_token.is_some() {
-                ("collected", None, fee_usdc)
-            } else {
-                let owed = money::owed_fee(raw_paid, expected_fee_bps, money::configured_floor());
-                let owed_usd = match applied_rate {
-                    Some(rate) => owed * rate,
-                    None => owed,
+            Err(err) => {
+                let Some(tracker) = failure_tracker.as_deref_mut() else {
+                    return Err(err);
                 };
-                tracing::info!(merchant_id = %merchant.id, owed = %owed, asset = %asset_code, "fee owed by merchant (no fee leg on-chain)");
-                ("owed", Some(owed), owed_usd)
-            };
-        if verdict.status == "held" {
-            tracing::warn!(
-                muxed_id,
-                tx_hash = %op.transaction_hash,
-                reason = ?verdict.flag_reason,
-                "payment held for review: does not match its session's link"
-            );
-        }
+                let (failure_count, should_skip) = tracker.record_failure(&op.paging_token);
+                if !should_skip {
+                    return Err(err);
+                }
 
-        let recorded = store
-            .record_payment_if_new(
-                merchant,
-                muxed_id as i64,
-                &muxed_address,
-                &payer,
-                &asset_code,
-                asset_issuer.as_deref(),
-                &usd_amount,
-                fee_usdc,
-                fee_paging_token.as_deref(),
-                applied_rate,
-                &op.paging_token,
-                &op.transaction_hash,
-                &verdict,
-                fee_status,
-                fee_owed_raw,
-                &asset_code,
-                asset_issuer.as_deref(),
-            )
-            .await?;
-
-        if let Some(recorded) = recorded {
-            tracing::info!(
-                muxed_id,
-                merchant_id = %merchant.id,
-                payer = %payer,
-                raw_amount = %raw_amount,
-                usd_amount = %usd_amount,
-                asset = %asset_code,
-                tx_hash = %op.transaction_hash,
-                locally_blocked = recorded.locally_blocked,
-                "MATCHED: payment recorded in Postgres with real fee math"
-            );
-            found_any = true;
-
-            // Already flagged and held via the cheap local check above —
-            // no need for the slower on-chain check too.
-            if !recorded.locally_blocked {
-                let store = store.clone();
-                let payer = payer.clone();
-                let payment_id = recorded.id;
-                pending_checks.push(tokio::spawn(async move {
-                    if !compliance::is_allowed_on_chain(&payer).await {
-                        match store.mark_held(payment_id).await {
-                            Ok(()) => tracing::warn!(
-                                payment_id = %payment_id,
-                                payer = %payer,
-                                "payment flagged by on-chain compliance check after the fact — marked held for review"
-                            ),
-                            Err(err) => tracing::warn!(
-                                payment_id = %payment_id,
-                                error = %err,
-                                "failed to mark a compliance-flagged payment held"
-                            ),
-                        }
-                    }
-                }));
+                let error_message = format!("{err:#}");
+                tracing::error!(
+                    merchant_id = %merchant.id,
+                    paging_token = %op.paging_token,
+                    tx_hash = %op.transaction_hash,
+                    failure_count,
+                    error = %error_message,
+                    "permanently malformed payment op failed repeatedly at the same cursor position — recording to reconciler_skipped_ops for manual review and advancing cursor past it"
+                );
+                let raw_payload = serde_json::to_string(op).ok();
+                store
+                    .record_skipped_op(
+                        merchant.id,
+                        &op.paging_token,
+                        &op.transaction_hash,
+                        raw_payload.as_deref(),
+                        &error_message,
+                        failure_count as i32,
+                    )
+                    .await?;
+                *cursor = op.paging_token.clone();
+                cursor_key.set(store, cursor).await?;
+                tracker.record_success();
             }
-        } else {
-            tracing::debug!(paging_token = %op.paging_token, "already seen — dedup no-op, as expected on replay");
         }
-
-        // Advance only after the record is durably committed above — never
-        // before. A crash between insert and this line just reprocesses
-        // the same op next run, which record_payment_if_new makes a safe
-        // no-op.
-        *cursor = op.paging_token.clone();
-        cursor_key.set(store, cursor).await?;
     }
 
     Ok(found_any)
+}
+
+async fn process_payment_op(
+    horizon: &HorizonClient,
+    store: &Store,
+    merchant: &Merchant,
+    op: &horizon::PaymentOp,
+    muxed_id: u64,
+    xlm_usdc_rate: &mut Option<rust_decimal::Decimal>,
+    eurc_usdc_rate: &mut Option<rust_decimal::Decimal>,
+    pending_checks: &mut Vec<tokio::task::JoinHandle<()>>,
+) -> Result<bool> {
+    let (asset_code, asset_issuer): (String, Option<String>) = match op.asset_type.as_deref() {
+        Some("native") => ("XLM".to_string(), None),
+        _ => (
+            op.asset_code.clone().unwrap_or_default(),
+            op.asset_issuer.clone(),
+        ),
+    };
+    let payer = op.from.clone().unwrap_or_default();
+    let raw_amount = op.amount.as_deref().unwrap_or("0");
+    let muxed_address = op.to_muxed.clone().unwrap_or_else(|| op.to.clone().unwrap_or_default());
+
+    // amount_usdc/fee_usdc/net_usdc are meant to be USD-equivalent
+    // regardless of what asset was actually sent — asset_code/
+    // asset_issuer already preserve the real audit trail of what
+    // was paid, so converting here doesn't lose that information.
+    let applied_rate: Option<rust_decimal::Decimal> = if asset_code == "XLM" {
+        Some(match *xlm_usdc_rate {
+            Some(r) => r,
+            None => {
+                let r = horizon.xlm_usdc_rate(&usdc_issuer()).await?;
+                *xlm_usdc_rate = Some(r);
+                r
+            }
+        })
+    } else if asset_code == "EURC" {
+        Some(match *eurc_usdc_rate {
+            Some(r) => r,
+            None => {
+                let r = horizon.eurc_usdc_rate(&eurc_issuer(), &usdc_issuer()).await?;
+                *eurc_usdc_rate = Some(r);
+                r
+            }
+        })
+    } else {
+        None
+    };
+    let usd_amount: String = match applied_rate {
+        Some(rate) => {
+            let raw: rust_decimal::Decimal = raw_amount.parse().context("horizon returned a non-decimal XLM amount")?;
+            (raw * rate).to_string()
+        }
+        None => raw_amount.to_string(),
+    };
+
+    // Additive fee collection means the merchant's own leg above
+    // (usd_amount) is untouched — it's exactly what the merchant
+    // received, same as before this feature existed. The fee itself
+    // is a *separate* payment operation, in the same transaction, to
+    // PLATFORM_FEE_ADDRESS — invisible to payments_since's per-account
+    // feed since it never touches the merchant's address at all. Only
+    // look for it when a fee is actually expected, to avoid a Horizon
+    // round trip on every single payment.
+    let expected_fee_bps = store.effective_fee_bps(merchant).await?;
+    let (fee_usdc, fee_paging_token): (rust_decimal::Decimal, Option<String>) = if expected_fee_bps > 0 {
+        match platform_fee_address() {
+            Some(fee_address) => {
+                let sibling_ops = horizon.operations_for_transaction(&op.transaction_hash).await?;
+                let fee_op = sibling_ops.iter().find(|o| {
+                    if o.op_type != "payment" || o.to.as_deref() != Some(fee_address.as_str()) {
+                        return false;
+                    }
+                    let (sibling_code, sibling_issuer): (&str, Option<&str>) = match o.asset_type.as_deref() {
+                        Some("native") => ("XLM", None),
+                        _ => (o.asset_code.as_deref().unwrap_or(""), o.asset_issuer.as_deref()),
+                    };
+                    sibling_code == asset_code && sibling_issuer == asset_issuer.as_deref()
+                });
+                match fee_op {
+                    Some(fee_op) => {
+                        let raw_fee: rust_decimal::Decimal = fee_op
+                            .amount
+                            .as_deref()
+                            .unwrap_or("0")
+                            .parse()
+                            .context("horizon returned a non-decimal fee amount")?;
+                        let fee_usd = match applied_rate {
+                            Some(rate) => raw_fee * rate,
+                            None => raw_fee,
+                        };
+                        (fee_usd, Some(fee_op.paging_token.clone()))
+                    }
+                    None => {
+                        tracing::warn!(
+                            tx_hash = %op.transaction_hash,
+                            merchant_id = %merchant.id,
+                            expected_fee_bps,
+                            "expected a platform fee leg but found none in this transaction"
+                        );
+                        (rust_decimal::Decimal::ZERO, None)
+                    }
+                }
+            }
+            None => (rust_decimal::Decimal::ZERO, None),
+        }
+    } else {
+        (rust_decimal::Decimal::ZERO, None)
+    };
+
+    // Checked against the session's link before anything is written, so a
+    // payment that doesn't match what was asked for lands as 'held' with
+    // a reason. A fee that was expected but absent is flagged, not held:
+    // the merchant was paid in full.
+    let raw_paid: rust_decimal::Decimal = raw_amount.parse().context("horizon returned a non-decimal payment amount")?;
+    let link = store.link_expectation(merchant.id, muxed_id as i64).await?;
+    let verdict_issuer = asset_issuer.as_deref();
+    let verdict = verdict::assess(link.as_ref(), raw_paid, &asset_code, verdict_issuer);
+
+    // Fee status (docs/design/qr-fee-collection.md, Option B). A fee leg
+    // on-chain means collected. Without it, the fee is owed by the merchant,
+    // in the payment's own asset, rounded down to a stroop so it never asks
+    // for more than the merchant owes. A deployment without a fee account
+    // collects no fee, so nothing is owed.
+    let (fee_status, fee_owed_raw, fee_usdc): (&str, Option<rust_decimal::Decimal>, rust_decimal::Decimal) =
+        if expected_fee_bps == 0 || platform_fee_address().is_none() {
+            ("none", None, rust_decimal::Decimal::ZERO)
+        } else if fee_paging_token.is_some() {
+            ("collected", None, fee_usdc)
+        } else {
+            let owed = money::owed_fee(raw_paid, expected_fee_bps, money::configured_floor());
+            let owed_usd = match applied_rate {
+                Some(rate) => owed * rate,
+                None => owed,
+            };
+            tracing::info!(merchant_id = %merchant.id, owed = %owed, asset = %asset_code, "fee owed by merchant (no fee leg on-chain)");
+            ("owed", Some(owed), owed_usd)
+        };
+    if verdict.status == "held" {
+        tracing::warn!(
+            muxed_id,
+            tx_hash = %op.transaction_hash,
+            reason = ?verdict.flag_reason,
+            "payment held for review: does not match its session's link"
+        );
+    }
+
+    let recorded = store
+        .record_payment_if_new(
+            merchant,
+            muxed_id as i64,
+            &muxed_address,
+            &payer,
+            &asset_code,
+            asset_issuer.as_deref(),
+            &usd_amount,
+            fee_usdc,
+            fee_paging_token.as_deref(),
+            applied_rate,
+            &op.paging_token,
+            &op.transaction_hash,
+            &verdict,
+            fee_status,
+            fee_owed_raw,
+            &asset_code,
+            asset_issuer.as_deref(),
+        )
+        .await?;
+
+    if let Some(recorded) = recorded {
+        tracing::info!(
+            muxed_id,
+            merchant_id = %merchant.id,
+            payer = %payer,
+            raw_amount = %raw_amount,
+            usd_amount = %usd_amount,
+            asset = %asset_code,
+            tx_hash = %op.transaction_hash,
+            locally_blocked = recorded.locally_blocked,
+            "MATCHED: payment recorded in Postgres with real fee math"
+        );
+
+        // Already flagged and held via the cheap local check above —
+        // no need for the slower on-chain check too.
+        if !recorded.locally_blocked {
+            let store = store.clone();
+            let payer = payer.clone();
+            let payment_id = recorded.id;
+            pending_checks.push(tokio::spawn(async move {
+                if !compliance::is_allowed_on_chain(&payer).await {
+                    match store.mark_held(payment_id).await {
+                        Ok(()) => tracing::warn!(
+                            payment_id = %payment_id,
+                            payer = %payer,
+                            "payment flagged by on-chain compliance check after the fact — marked held for review"
+                        ),
+                        Err(err) => tracing::warn!(
+                            payment_id = %payment_id,
+                            error = %err,
+                            "failed to mark a compliance-flagged payment held"
+                        ),
+                    }
+                }
+            }));
+        }
+        Ok(true)
+    } else {
+        tracing::debug!(paging_token = %op.paging_token, "already seen — dedup no-op, as expected on replay");
+        Ok(false)
+    }
 }
 
 // A clean exit from watch() waits for any in-flight background compliance
@@ -627,5 +755,134 @@ mod shared_config_tests {
             serde_json::from_str(include_str!("../../src/common/stellar-assets.json")).unwrap();
         assert_eq!(shared["testnet"]["USDC"], USDC_TESTNET_ISSUER);
         assert_eq!(shared["testnet"]["EURC"], EURC_TESTNET_ISSUER);
+    }
+}
+
+#[cfg(test)]
+mod op_failure_tests {
+    use super::{OpFailureTracker, MAX_CONSECUTIVE_OP_FAILURES};
+    use crate::horizon::{EmbeddedTransaction, PaymentOp};
+    use anyhow::{Context, Result};
+
+    fn sample_op(paging_token: &str, amount: &str) -> PaymentOp {
+        PaymentOp {
+            id: paging_token.to_string(),
+            paging_token: paging_token.to_string(),
+            op_type: "payment".to_string(),
+            transaction_hash: format!("tx-{paging_token}"),
+            asset_type: Some("credit_alphanum4".to_string()),
+            asset_code: Some("USDC".to_string()),
+            asset_issuer: Some(super::USDC_TESTNET_ISSUER.to_string()),
+            from: Some("GDIET4T37N35XU4FY52RMR4Z653WYFITEHGIJXN4VEQTDYR5JSURJDPL".to_string()),
+            to: Some("GBXBABMFZIJPTOFI6STUXA2FMEXDBB4URBD3VS5XDHKMFHGLJZ5WPQBB".to_string()),
+            amount: Some(amount.to_string()),
+            to_muxed: None,
+            to_muxed_id: None,
+            transaction: Some(EmbeddedTransaction {
+                memo: Some("42".to_string()),
+                memo_type: Some("id".to_string()),
+            }),
+        }
+    }
+
+    fn simulate_poll_batch(
+        ops: &[PaymentOp],
+        cursor: &mut String,
+        tracker: &mut OpFailureTracker,
+        skipped_log: &mut Vec<(String, String, u32)>,
+        recorded_tokens: &mut Vec<String>,
+    ) -> Result<()> {
+        for op in ops {
+            if op.paging_token <= *cursor {
+                continue;
+            }
+            let raw_amount = op.amount.as_deref().unwrap_or("0");
+            let parse_res: Result<rust_decimal::Decimal> = raw_amount
+                .parse()
+                .context("horizon returned a non-decimal payment amount");
+
+            match parse_res {
+                Ok(_paid) => {
+                    recorded_tokens.push(op.paging_token.clone());
+                    tracker.record_success();
+                    *cursor = op.paging_token.clone();
+                }
+                Err(err) => {
+                    let (count, should_skip) = tracker.record_failure(&op.paging_token);
+                    if !should_skip {
+                        return Err(err);
+                    }
+                    skipped_log.push((op.paging_token.clone(), format!("{err:#}"), count));
+                    *cursor = op.paging_token.clone();
+                    tracker.record_success();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn permanently_failing_op_is_skipped_after_threshold_and_unblocks_subsequent_ops() {
+        let ops = vec![
+            sample_op("1001", "not-a-decimal"),
+            sample_op("1002", "25.0000000"),
+        ];
+        let mut cursor = "1000".to_string();
+        let mut tracker = OpFailureTracker::new(MAX_CONSECUTIVE_OP_FAILURES);
+        let mut skipped_log = Vec::new();
+        let mut recorded_tokens = Vec::new();
+
+        // First MAX_CONSECUTIVE_OP_FAILURES - 1 attempts fail normally and keep cursor at "1000"
+        for attempt in 1..MAX_CONSECUTIVE_OP_FAILURES {
+            let err = simulate_poll_batch(
+                &ops,
+                &mut cursor,
+                &mut tracker,
+                &mut skipped_log,
+                &mut recorded_tokens,
+            )
+            .expect_err("should fail and back off before reaching skip threshold");
+            assert!(err.to_string().contains("non-decimal payment amount"));
+            assert_eq!(cursor, "1000", "cursor must not advance on attempt {attempt}");
+            assert!(skipped_log.is_empty());
+            assert!(recorded_tokens.is_empty());
+        }
+
+        // On the Nth consecutive failure for the same paging_token, the poison op
+        // is skipped and recorded, and the next valid payment in the batch succeeds.
+        simulate_poll_batch(
+            &ops,
+            &mut cursor,
+            &mut tracker,
+            &mut skipped_log,
+            &mut recorded_tokens,
+        )
+        .expect("Nth failure should skip malformed op and process remaining batch");
+
+        assert_eq!(skipped_log.len(), 1);
+        assert_eq!(skipped_log[0].0, "1001");
+        assert_eq!(skipped_log[0].2, MAX_CONSECUTIVE_OP_FAILURES);
+        assert_eq!(recorded_tokens, vec!["1002".to_string()]);
+        assert_eq!(cursor, "1002");
+    }
+
+    #[test]
+    fn transient_failures_below_threshold_do_not_skip_and_reset_on_success() {
+        let mut tracker = OpFailureTracker::new(3);
+
+        // Two transient failures on token "2001"
+        assert_eq!(tracker.record_failure("2001"), (1, false));
+        assert_eq!(tracker.record_failure("2001"), (2, false));
+
+        // Succeeds on third attempt -> resets counter
+        tracker.record_success();
+
+        // A subsequent failure on "2001" starts fresh at 1, not 3
+        assert_eq!(tracker.record_failure("2001"), (1, false));
+
+        // Failure on a different paging_token resets counter to 1 for the new token
+        assert_eq!(tracker.record_failure("2002"), (1, false));
+        assert_eq!(tracker.record_failure("2002"), (2, false));
+        assert_eq!(tracker.record_failure("2002"), (3, true));
     }
 }

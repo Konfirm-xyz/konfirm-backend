@@ -193,6 +193,11 @@ export class AdminController {
     return this.reconciler.status();
   }
 
+  @Get('reconciler/skipped-ops')
+  listSkippedReconcilerOps(@Query('status') status?: string) {
+    return this.reconciler.listSkippedOps(status);
+  }
+
   // Backward-only, enforced in AdminReconcilerService — the exact "never
   // advance past unprocessed payments" rule from docs/RUNBOOK.md §4.
   @Post('reconciler/rewind')
