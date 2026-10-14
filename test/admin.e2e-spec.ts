@@ -94,6 +94,26 @@ describe('admin workflow: suspend/reactivate a merchant (e2e)', () => {
     expect(res.body.some((m: { email: string }) => m.email === merchantEmail)).toBe(true);
   });
 
+  it('rejects non-numeric, negative, or out-of-range limit/offset/days query params with 400 instead of 500', async () => {
+    const nanRes = await request(app.getHttpServer()).get('/admin/merchants?limit=abc').set('Cookie', adminCookie).expect(400);
+    expect(nanRes.body.fieldErrors?.limit?.[0]).toMatch(/limit/i);
+
+    const negRes = await request(app.getHttpServer()).get('/admin/merchants?limit=-1').set('Cookie', adminCookie).expect(400);
+    expect(negRes.body.fieldErrors?.limit?.[0]).toMatch(/limit/i);
+
+    await request(app.getHttpServer()).get('/admin/merchants?offset=-1').set('Cookie', adminCookie).expect(400);
+    await request(app.getHttpServer()).get('/admin/payments?limit=abc').set('Cookie', adminCookie).expect(400);
+    await request(app.getHttpServer()).get('/admin/x402-settlements?limit=-1').set('Cookie', adminCookie).expect(400);
+    await request(app.getHttpServer()).get('/admin/links?limit=abc').set('Cookie', adminCookie).expect(400);
+    await request(app.getHttpServer()).get('/admin/notifications?limit=-1').set('Cookie', adminCookie).expect(400);
+    await request(app.getHttpServer()).get('/admin/fee-revenue/daily?days=abc').set('Cookie', adminCookie).expect(400);
+    await request(app.getHttpServer()).get('/admin/users?limit=abc').set('Cookie', adminCookie).expect(400);
+    await request(app.getHttpServer()).get('/admin/wallets?limit=-1').set('Cookie', adminCookie).expect(400);
+    await request(app.getHttpServer()).get('/admin/exchange-rate/conversions?limit=abc').set('Cookie', adminCookie).expect(400);
+    await request(app.getHttpServer()).get('/admin/referrals?limit=-1').set('Cookie', adminCookie).expect(400);
+    await request(app.getHttpServer()).get('/admin/activity?limit=abc').set('Cookie', adminCookie).expect(400);
+  });
+
   it('rejects the admin API with no admin session at all', async () => {
     await request(app.getHttpServer()).get('/admin/merchants').expect(401);
   });
