@@ -291,6 +291,50 @@ describe('admin workflow: suspend/reactivate a merchant (e2e)', () => {
     });
   });
 
+  describe('links: use_count and net_usdc count only paid payments', () => {
+    const linksPayer = `G${'ADMINLINKSTEST'.padEnd(55, 'A')}`;
+
+    afterAll(async () => {
+      await pool.query('DELETE FROM payments WHERE payer_address = $1', [linksPayer]);
+    });
+
+    it('reports use_count = 0 and net_usdc = "0" when a link only has refunded/held/disputed payments, and counts only paid rows', async () => {
+      await pool.query(
+        `INSERT INTO payments (merchant_id, link_id, muxed_id, muxed_address, payer_address, asset_code, amount_usdc, fee_usdc, net_usdc, status, paging_token, tx_hash, ledger_sequence)
+         VALUES
+           ($1, $2, 121, 'M...lnk1', $3, 'USDC', 100, 1, 99, 'refunded', $4, 'e2e-lnk-tx-1', 1),
+           ($1, $2, 122, 'M...lnk2', $3, 'USDC', 50, 0.5, 49.5, 'held', $5, 'e2e-lnk-tx-2', 1),
+           ($1, $2, 123, 'M...lnk3', $3, 'USDC', 25, 0.25, 24.75, 'disputed', $6, 'e2e-lnk-tx-3', 1)`,
+        [
+          merchantId,
+          linkId,
+          linksPayer,
+          `e2e-lnk-paging-1-${Date.now()}`,
+          `e2e-lnk-paging-2-${Date.now()}`,
+          `e2e-lnk-paging-3-${Date.now()}`,
+        ],
+      );
+
+      const unpaidRes = await request(app.getHttpServer()).get('/admin/links').set('Cookie', adminCookie).expect(200);
+      const unpaidLink = unpaidRes.body.find((l: { id: string }) => l.id === linkId);
+      expect(unpaidLink).toBeDefined();
+      expect(unpaidLink.use_count).toBe(0);
+      expect(unpaidLink.net_usdc).toBe('0');
+
+      await pool.query(
+        `INSERT INTO payments (merchant_id, link_id, muxed_id, muxed_address, payer_address, asset_code, amount_usdc, fee_usdc, net_usdc, status, paging_token, tx_hash, ledger_sequence)
+         VALUES ($1, $2, 124, 'M...lnk4', $3, 'USDC', 10, 1, 9, 'paid', $4, 'e2e-lnk-tx-4', 1)`,
+        [merchantId, linkId, linksPayer, `e2e-lnk-paging-4-${Date.now()}`],
+      );
+
+      const paidRes = await request(app.getHttpServer()).get('/admin/links').set('Cookie', adminCookie).expect(200);
+      const paidLink = paidRes.body.find((l: { id: string }) => l.id === linkId);
+      expect(paidLink).toBeDefined();
+      expect(paidLink.use_count).toBe(1);
+      expect(Number(paidLink.net_usdc)).toBeCloseTo(9, 5);
+    });
+  });
+
   describe('exchange rate: live rate reachable, and applied conversions are auditable', () => {
     const xrPayer = `G${'EXCHANGERATETEST'.padEnd(55, 'A')}`;
 
