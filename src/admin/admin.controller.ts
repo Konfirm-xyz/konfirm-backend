@@ -55,6 +55,56 @@ const setBazaarListingStatusSchema = z.object({
   status: z.enum(['approved', 'rejected']),
 });
 
+const limitParamSchema = z
+  .preprocess(
+    (v) => (typeof v === 'string' && v.trim() === '' ? NaN : v),
+    z.coerce
+      .number({ invalid_type_error: 'limit must be a valid integer' })
+      .int('limit must be an integer')
+      .min(1, 'limit must be between 1 and 500')
+      .max(500, 'limit must be between 1 and 500'),
+  )
+  .optional();
+
+const offsetParamSchema = z
+  .preprocess(
+    (v) => (typeof v === 'string' && v.trim() === '' ? NaN : v),
+    z.coerce
+      .number({ invalid_type_error: 'offset must be a valid integer' })
+      .int('offset must be an integer')
+      .min(0, 'offset must be a non-negative integer')
+      .max(100_000, 'offset must be at most 100000'),
+  )
+  .optional();
+
+const daysParamSchema = z
+  .preprocess(
+    (v) => (typeof v === 'string' && v.trim() === '' ? NaN : v),
+    z.coerce
+      .number({ invalid_type_error: 'days must be a valid integer' })
+      .int('days must be an integer')
+      .min(1, 'days must be between 1 and 365')
+      .max(365, 'days must be between 1 and 365'),
+  )
+  .optional();
+
+export const paginationQuerySchema = z.object({
+  limit: limitParamSchema,
+  offset: offsetParamSchema,
+});
+
+export const statusPaginationQuerySchema = paginationQuerySchema.extend({
+  status: z.string().optional(),
+});
+
+export const limitOnlyQuerySchema = z.object({
+  limit: limitParamSchema,
+});
+
+export const daysQuerySchema = z.object({
+  days: daysParamSchema,
+});
+
 // One controller for the whole admin resource surface rather than one per
 // domain. This has grown past the "5 resources" this comment used to say —
 // it's 18 services and ~30 routes now — but the reason still holds: every
@@ -97,8 +147,11 @@ export class AdminController {
   // --- Merchants ---
 
   @Get('merchants')
-  listMerchants(@Query('limit') limit?: string, @Query('offset') offset?: string) {
-    return this.merchants.list(limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
+  listMerchants(
+    @Query(new ZodValidationPipe(paginationQuerySchema))
+    query: z.infer<typeof paginationQuerySchema> = {},
+  ) {
+    return this.merchants.list(query.limit, query.offset);
   }
 
   // For a merchant who has lost their password. Sends the same emailed link
@@ -147,8 +200,11 @@ export class AdminController {
   // --- Payments ---
 
   @Get('payments')
-  listPayments(@Query('status') status?: string, @Query('limit') limit?: string, @Query('offset') offset?: string) {
-    return this.payments.list(status, limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
+  listPayments(
+    @Query(new ZodValidationPipe(statusPaginationQuerySchema))
+    query: z.infer<typeof statusPaginationQuerySchema> = {},
+  ) {
+    return this.payments.list(query.status, query.limit, query.offset);
   }
 
   @Patch('payments/:id/status')
@@ -218,15 +274,21 @@ export class AdminController {
   // --- x402 settlements ---
 
   @Get('x402-settlements')
-  listX402Settlements(@Query('status') status?: string, @Query('limit') limit?: string, @Query('offset') offset?: string) {
-    return this.x402Settlements.list(status, limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
+  listX402Settlements(
+    @Query(new ZodValidationPipe(statusPaginationQuerySchema))
+    query: z.infer<typeof statusPaginationQuerySchema> = {},
+  ) {
+    return this.x402Settlements.list(query.status, query.limit, query.offset);
   }
 
   // --- Pay links ---
 
   @Get('links')
-  listLinks(@Query('limit') limit?: string, @Query('offset') offset?: string) {
-    return this.links.list(limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
+  listLinks(
+    @Query(new ZodValidationPipe(paginationQuerySchema))
+    query: z.infer<typeof paginationQuerySchema> = {},
+  ) {
+    return this.links.list(query.limit, query.offset);
   }
 
   // --- Blockchain status ---
@@ -239,8 +301,11 @@ export class AdminController {
   // --- Notifications ---
 
   @Get('notifications')
-  listNotifications(@Query('limit') limit?: string) {
-    return this.notifications.list(limit ? Number(limit) : undefined);
+  listNotifications(
+    @Query(new ZodValidationPipe(limitOnlyQuerySchema))
+    query: z.infer<typeof limitOnlyQuerySchema> = {},
+  ) {
+    return this.notifications.list(query.limit);
   }
 
   // --- Treasury ---
@@ -258,8 +323,11 @@ export class AdminController {
   }
 
   @Get('fee-revenue/daily')
-  getFeeRevenueDaily(@Query('days') days?: string) {
-    return this.feeRevenue.daily(days ? Number(days) : undefined);
+  getFeeRevenueDaily(
+    @Query(new ZodValidationPipe(daysQuerySchema))
+    query: z.infer<typeof daysQuerySchema> = {},
+  ) {
+    return this.feeRevenue.daily(query.days);
   }
 
   // --- Users ---
@@ -267,8 +335,11 @@ export class AdminController {
   // see AdminUsersService's comment for why that's the honest framing.
 
   @Get('users')
-  listUsers(@Query('limit') limit?: string, @Query('offset') offset?: string) {
-    return this.users.list(limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
+  listUsers(
+    @Query(new ZodValidationPipe(paginationQuerySchema))
+    query: z.infer<typeof paginationQuerySchema> = {},
+  ) {
+    return this.users.list(query.limit, query.offset);
   }
 
   // --- Wallets ---
@@ -276,8 +347,11 @@ export class AdminController {
   // see AdminWalletsService for why this isn't a new data source.
 
   @Get('wallets')
-  listWallets(@Query('limit') limit?: string, @Query('offset') offset?: string) {
-    return this.wallets.list(limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
+  listWallets(
+    @Query(new ZodValidationPipe(paginationQuerySchema))
+    query: z.infer<typeof paginationQuerySchema> = {},
+  ) {
+    return this.wallets.list(query.limit, query.offset);
   }
 
   // --- Exchange rate ---
@@ -288,15 +362,21 @@ export class AdminController {
   }
 
   @Get('exchange-rate/conversions')
-  listExchangeRateConversions(@Query('limit') limit?: string) {
-    return this.exchangeRate.recentConversions(limit ? Number(limit) : undefined);
+  listExchangeRateConversions(
+    @Query(new ZodValidationPipe(limitOnlyQuerySchema))
+    query: z.infer<typeof limitOnlyQuerySchema> = {},
+  ) {
+    return this.exchangeRate.recentConversions(query.limit);
   }
 
   // --- Referrals ---
 
   @Get('referrals')
-  listReferrals(@Query('limit') limit?: string, @Query('offset') offset?: string) {
-    return this.referrals.list(limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
+  listReferrals(
+    @Query(new ZodValidationPipe(paginationQuerySchema))
+    query: z.infer<typeof paginationQuerySchema> = {},
+  ) {
+    return this.referrals.list(query.limit, query.offset);
   }
 
   // --- Bazaar listings ---
@@ -338,7 +418,10 @@ export class AdminController {
   // just written and forgotten — an audit log nobody reads back isn't
   // accountability, it's a checkbox.
   @Get('activity')
-  recentActivity(@Query('limit') limit?: string) {
-    return this.actions.recent(limit ? Number(limit) : undefined);
+  recentActivity(
+    @Query(new ZodValidationPipe(limitOnlyQuerySchema))
+    query: z.infer<typeof limitOnlyQuerySchema> = {},
+  ) {
+    return this.actions.recent(query.limit);
   }
 }
