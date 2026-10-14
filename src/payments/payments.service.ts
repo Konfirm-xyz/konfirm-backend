@@ -161,6 +161,18 @@ export class PaymentsService {
   // itself; SEP-7 has no equivalent to bundling ChangeTrust in advance.
   async buildPayUri(linkId: string, muxedId: string): Promise<{ uri: string }> {
     const link = await this.loadPayableLink(linkId);
+    const feeBps = await getEffectiveFeeBps(link.merchant_id);
+    const feeAmount = feeStroops(
+      toStroops(String(link.amount_usdc)),
+      feeBps,
+      toStroops(platformFeeFloor()),
+    );
+    if (feeAmount > 0n) {
+      throw new BadRequestException(
+        'SEP-7 pay-uri is not available for fee-bearing links; use /payments/prepare-tx so the platform fee leg is included',
+      );
+    }
+
     const asset = resolveAsset(link.currency);
 
     const parts = [
