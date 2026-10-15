@@ -1,16 +1,39 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { pool } from '../db/pool';
 
 const HALT_KEY = 'halted_at';
 const HALT_REASON_KEY = 'halt_reason';
 
+export interface ParsedDailyCap {
+  capUsdc: number;
+  configError: string | null;
+}
+
 // A tunable ceiling, not a hardcoded guess -- how much daily exposure is
 // acceptable is an operational/business call, not something to bake into
 // code. Deliberately no fallback that silently disables the cap (an unset
-// env var defaults to a conservative $0, meaning "not configured" fails
-// closed too, consistent with everything else in this guard).
+// or malformed env var defaults to a conservative $0, meaning "not
+// configured" and "misconfigured" both fail closed, consistent with
+// everything else in this guard).
+export function parseDailyCapUsdc(
+  raw: string | undefined = process.env.FACILITATOR_DAILY_SPEND_CAP_USDC,
+): ParsedDailyCap {
+  if (raw === undefined || raw.trim() === '') {
+    return { capUsdc: 0, configError: null };
+  }
+  const trimmed = raw.trim();
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed) || parsed < 0 || !/^\d+(\.\d+)?$/.test(trimmed)) {
+    return {
+      capUsdc: 0,
+      configError: `FACILITATOR_DAILY_SPEND_CAP_USDC=${JSON.stringify(raw)} is not a valid non-negative number; failing closed to $0`,
+    };
+  }
+  return { capUsdc: parsed, configError: null };
+}
+
 function dailyCapUsdc(): number {
-  return Number(process.env.FACILITATOR_DAILY_SPEND_CAP_USDC ?? '0');
+  return parseDailyCapUsdc().capUsdc;
 }
 
 export class FacilitatorSpendCapExceeded extends Error {}
@@ -33,8 +56,15 @@ export class FacilitatorHalted extends Error {}
  * looking at it, not an automatic reset at midnight.
  */
 @Injectable()
-export class FacilitatorSpendGuardService {
+export class FacilitatorSpendGuardService implements OnModuleInit {
   private readonly logger = new Logger(FacilitatorSpendGuardService.name);
+
+  onModuleInit(): void {
+    const { configError } = parseDailyCapUsdc();
+    if (configError) {
+      this.logger.error(`facilitator spend guard misconfigured: ${configError}`);
+    }
+  }
 
   async checkAndRecordSpend(amountUsdc: number, operation: string, reference?: string): Promise<void> {
     let halted: { value: string } | undefined;
@@ -60,14 +90,15 @@ export class FacilitatorSpendGuardService {
     }
 
     const spentToday = Number(spentTodayRow.total);
-    const cap = dailyCapUsdc();
-    if (spentToday + amountUsdc > cap) {
+    const { capUsdc: cap, configError } = parseDailyCapUsdc();
+    if (configError !== null || !(spentToday + amountUsdc <= cap)) {
+      const reasonDetail = configError ? ` (${configError})` : '';
       await this.halt(
         `daily cap exceeded: attempted $${amountUsdc} (${operation}${reference ? ` ${reference}` : ''}) ` +
-          `with $${spentToday} already spent today against a $${cap} cap`,
+          `with $${spentToday} already spent today against a $${cap} cap${reasonDetail}`,
       );
       throw new FacilitatorSpendCapExceeded(
-        `signing this $${amountUsdc} ${operation} would exceed the daily cap of $${cap} ` +
+        `signing this $${amountUsdc} ${operation} would exceed the daily cap of $${cap}${reasonDetail} ` +
           `($${spentToday} already spent today) -- halting further signing pending manual review`,
       );
     }
@@ -93,7 +124,14 @@ export class FacilitatorSpendGuardService {
     );
   }
 
-  async status(): Promise<{ halted: boolean; haltedAt: string | null; haltReason: string | null; spentTodayUsdc: number; capUsdc: number }> {
+  async status(): Promise<{
+    halted: boolean;
+    haltedAt: string | null;
+    haltReason: string | null;
+    spentTodayUsdc: number;
+    capUsdc: number;
+    capConfigError: string | null;
+  }> {
     const [haltedAt, reason, spend] = await Promise.all([
       pool.query<{ value: string }>('SELECT value FROM facilitator_state WHERE key = $1', [HALT_KEY]),
       pool.query<{ value: string }>('SELECT value FROM facilitator_state WHERE key = $1', [HALT_REASON_KEY]),
@@ -101,12 +139,14 @@ export class FacilitatorSpendGuardService {
         `SELECT COALESCE(SUM(amount_usdc), 0) AS total FROM facilitator_spend_log WHERE created_at >= date_trunc('day', NOW())`,
       ),
     ]);
+    const { capUsdc, configError } = parseDailyCapUsdc();
     return {
       halted: haltedAt.rows.length > 0,
       haltedAt: haltedAt.rows[0]?.value ?? null,
       haltReason: reason.rows[0]?.value ?? null,
       spentTodayUsdc: Number(spend.rows[0].total),
-      capUsdc: dailyCapUsdc(),
+      capUsdc,
+      capConfigError: configError,
     };
   }
 
