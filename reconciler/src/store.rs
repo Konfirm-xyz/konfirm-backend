@@ -46,6 +46,21 @@ fn resolve_effective_fee_bps(
     }
 }
 
+fn resolve_payment_verdict<'a>(
+    locally_blocked: bool,
+    verdict: &'a crate::verdict::Verdict,
+) -> (&'a str, Option<&'a str>) {
+    if locally_blocked {
+        ("held", Some("blocked_address"))
+    } else {
+        (verdict.status, verdict.flag_reason)
+    }
+}
+
+fn is_duplicate_muxed_id_violation(code: Option<&str>, constraint: Option<&str>) -> bool {
+    code == Some("23505") && constraint == Some("payments_muxed_id_idx")
+}
+
 impl Store {
     pub async fn connect(database_url: &str) -> Result<Self> {
         let pool = PgPoolOptions::new()
@@ -212,10 +227,9 @@ impl Store {
 
         // A locally-blocked payer overrides any verdict: held, reason says why.
         let locally_blocked = self.is_locally_blocked(payer_address).await?;
-        let status = if locally_blocked { "held" } else { verdict.status };
-        let flag_reason = if locally_blocked { Some("blocked_address") } else { verdict.flag_reason };
+        let (status, flag_reason) = resolve_payment_verdict(locally_blocked, verdict);
 
-        let inserted: Option<(Uuid,)> = sqlx::query_as(
+        let inserted: Option<(Uuid,)> = match sqlx::query_as(
             "INSERT INTO payments
                 (merchant_id, link_id, muxed_id, muxed_address, payer_address,
                  asset_code, asset_issuer, amount_usdc, fee_usdc, net_usdc, fx_rate_to_usd,
@@ -249,7 +263,31 @@ impl Store {
         .bind(fee_asset_code)
         .bind(fee_asset_issuer)
         .fetch_optional(&self.pool)
-        .await?;
+        .await
+        {
+            Ok(row) => row,
+            // A second payment to an already-used (merchant_id, muxed_id) with a
+            // different paging_token violates `payments_muxed_id_idx` (23505).
+            // Catch this specific constraint violation, log a warning, and return
+            // Ok(None) so `poll_once` can advance the cursor instead of wedging
+            // the merchant's reconciler loop forever (#77).
+            Err(sqlx::Error::Database(db_err))
+                if is_duplicate_muxed_id_violation(
+                    db_err.code().as_deref(),
+                    db_err.constraint(),
+                ) =>
+            {
+                tracing::warn!(
+                    merchant_id = %merchant.id,
+                    muxed_id,
+                    paging_token,
+                    tx_hash,
+                    "duplicate payment to an already-recorded (merchant_id, muxed_id) session — skipping insert so reconciler cursor can advance"
+                );
+                None
+            }
+            Err(err) => return Err(err.into()),
+        };
 
         Ok(inserted.map(|(id,)| RecordedPayment { id, locally_blocked }))
     }
@@ -444,6 +482,38 @@ mod test {
         // a discount that was never granted.
         assert_eq!(resolve_effective_fee_bps(10, None, true, Some(Decimal::from(500)), Decimal::from(0)), 10);
     }
+
+    #[test]
+    fn locally_blocked_payer_overrides_verdict_to_held_blocked_address() {
+        let paid_verdict = crate::verdict::Verdict {
+            status: "paid",
+            flag_reason: None,
+        };
+        assert_eq!(
+            resolve_payment_verdict(true, &paid_verdict),
+            ("held", Some("blocked_address"))
+        );
+        assert_eq!(
+            resolve_payment_verdict(false, &paid_verdict),
+            ("paid", None)
+        );
+    }
+
+    #[test]
+    fn duplicate_muxed_id_violation_matches_only_23505_on_payments_muxed_id_idx() {
+        assert!(is_duplicate_muxed_id_violation(
+            Some("23505"),
+            Some("payments_muxed_id_idx")
+        ));
+        assert!(!is_duplicate_muxed_id_violation(
+            Some("23505"),
+            Some("payments_paging_token_key")
+        ));
+        assert!(!is_duplicate_muxed_id_violation(
+            Some("23503"),
+            Some("payments_muxed_id_idx")
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -503,6 +573,140 @@ mod db_tests {
         assert_eq!(row.2.as_deref(), Some("XLM"));
 
         sqlx::query("DELETE FROM payments WHERE id = $1").bind(recorded.id).execute(&store.pool).await.unwrap();
+        sqlx::query("DELETE FROM merchants WHERE id = $1").bind(merchant.id).execute(&store.pool).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn locally_blocked_payer_overrides_paid_verdict_to_held() {
+        let url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| "postgres:///konfirm_test".to_string());
+        let store = Store::connect(&url).await.unwrap();
+        let email = format!("blocked-{}@example.com", Uuid::new_v4());
+        let merchant_addr = "GBXBABMFZIJPTOFI6STUXA2FMEXDBB4URBD3VS5XDHKMFHGLJZ5WPQBB";
+        let blocked_payer = format!("GBLOCKED{}", Uuid::new_v4().simple());
+        let merchant = store
+            .upsert_merchant_by_stellar_address(merchant_addr, &email, "Blocklist Test")
+            .await
+            .unwrap();
+
+        sqlx::query("INSERT INTO blocked_addresses (stellar_address, reason) VALUES ($1, 'sanctions test') ON CONFLICT DO NOTHING")
+            .bind(&blocked_payer)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        let paging = format!("blocked-paging-{}", Uuid::new_v4());
+        let verdict = Verdict { status: "paid", flag_reason: None };
+        let recorded = store
+            .record_payment_if_new(
+                &merchant,
+                5151,
+                merchant_addr,
+                &blocked_payer,
+                "USDC",
+                None,
+                "10.0000000",
+                Decimal::ZERO,
+                None,
+                None,
+                &paging,
+                "blocked-tx",
+                &verdict,
+                "collected",
+                None,
+                "USDC",
+                None,
+            )
+            .await
+            .unwrap()
+            .expect("payment row inserted");
+
+        assert!(recorded.locally_blocked);
+
+        let row: (String, Option<String>) = sqlx::query_as(
+            "SELECT status, flag_reason FROM payments WHERE id = $1",
+        )
+        .bind(recorded.id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0, "held");
+        assert_eq!(row.1.as_deref(), Some("blocked_address"));
+
+        sqlx::query("DELETE FROM payments WHERE id = $1").bind(recorded.id).execute(&store.pool).await.unwrap();
+        sqlx::query("DELETE FROM blocked_addresses WHERE stellar_address = $1").bind(&blocked_payer).execute(&store.pool).await.unwrap();
+        sqlx::query("DELETE FROM merchants WHERE id = $1").bind(merchant.id).execute(&store.pool).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn duplicate_muxed_id_with_new_paging_token_does_not_wedge_cursor() {
+        let url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| "postgres:///konfirm_test".to_string());
+        let store = Store::connect(&url).await.unwrap();
+        let email = format!("dup-muxed-{}@example.com", Uuid::new_v4());
+        let merchant_addr = "GBXBABMFZIJPTOFI6STUXA2FMEXDBB4URBD3VS5XDHKMFHGLJZ5WPQBB";
+        let payer_addr = "GDIET4T37N35XU4FY52RMR4Z653WYFITEHGIJXN4VEQTDYR5JSURJDPL";
+        let merchant = store
+            .upsert_merchant_by_stellar_address(merchant_addr, &email, "Dup Muxed Test")
+            .await
+            .unwrap();
+
+        let verdict = Verdict { status: "paid", flag_reason: None };
+        let paging1 = format!("dup-paging-1-{}", Uuid::new_v4());
+        let paging2 = format!("dup-paging-2-{}", Uuid::new_v4());
+
+        let first = store
+            .record_payment_if_new(
+                &merchant,
+                7777,
+                merchant_addr,
+                payer_addr,
+                "USDC",
+                None,
+                "5.0000000",
+                Decimal::ZERO,
+                None,
+                None,
+                &paging1,
+                "dup-tx-1",
+                &verdict,
+                "collected",
+                None,
+                "USDC",
+                None,
+            )
+            .await
+            .unwrap()
+            .expect("first payment for (merchant_id, muxed_id) succeeds");
+
+        // Second payment with the same (merchant_id, muxed_id) and a different
+        // paging_token/tx_hash must return Ok(None) rather than raising a 23505
+        // unique violation on payments_muxed_id_idx (#77, #78).
+        let second = store
+            .record_payment_if_new(
+                &merchant,
+                7777,
+                merchant_addr,
+                payer_addr,
+                "USDC",
+                None,
+                "5.0000000",
+                Decimal::ZERO,
+                None,
+                None,
+                &paging2,
+                "dup-tx-2",
+                &verdict,
+                "collected",
+                None,
+                "USDC",
+                None,
+            )
+            .await
+            .expect("second insert on same (merchant_id, muxed_id) must not return Err");
+        assert!(second.is_none());
+
+        sqlx::query("DELETE FROM payments WHERE id = $1").bind(first.id).execute(&store.pool).await.unwrap();
         sqlx::query("DELETE FROM merchants WHERE id = $1").bind(merchant.id).execute(&store.pool).await.unwrap();
     }
 }
