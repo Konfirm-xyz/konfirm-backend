@@ -18,6 +18,7 @@ interface AttestationDueRow {
   muxed_id: string;
   net_usdc: string;
   tx_hash: string;
+  onchain_payment_id?: string | null;
   merchant_address: string;
 }
 
@@ -29,6 +30,10 @@ interface AttestationDueRow {
 @Injectable()
 export class PaymentAttestationSweeperService {
   private readonly logger = new Logger(PaymentAttestationSweeperService.name);
+  // Tracks payments whose on-chain record_payment succeeded in this process
+  // but whose subsequent Postgres UPDATE failed, preventing a second
+  // on-chain attestation on the next sweep tick.
+  private readonly pendingWriteBacks = new Map<string, string>();
 
   constructor(private readonly attestation: PaymentAttestationService) {}
 
@@ -57,7 +62,7 @@ export class PaymentAttestationSweeperService {
 
   private async doSweep(): Promise<void> {
     const { rows } = await pool.query<AttestationDueRow>(
-      `SELECT p.id, p.payer_address, p.muxed_id, p.net_usdc, p.tx_hash, m.stellar_base_address AS merchant_address
+      `SELECT p.id, p.payer_address, p.muxed_id, p.net_usdc, p.tx_hash, p.onchain_payment_id, m.stellar_base_address AS merchant_address
        FROM payments p
        JOIN merchants m ON m.id = p.merchant_id
        WHERE p.status = 'paid' AND p.attested_at IS NULL
@@ -79,23 +84,32 @@ export class PaymentAttestationSweeperService {
       }
 
       try {
-        const result = await this.attestation.attest({
-          merchantAddress: row.merchant_address,
-          payerAddress: row.payer_address,
-          muxedId: row.muxed_id,
-          netUsdc: row.net_usdc,
-          txHash: row.tx_hash,
-        });
+        let onchainPaymentId =
+          row.onchain_payment_id ?? this.pendingWriteBacks.get(row.id);
 
-        if (!result.success) {
-          this.logger.warn(`attestation failed for payment ${row.id}: ${result.errorReason}`);
-          continue;
+        if (onchainPaymentId === undefined) {
+          const result = await this.attestation.attest({
+            merchantAddress: row.merchant_address,
+            payerAddress: row.payer_address,
+            muxedId: row.muxed_id,
+            netUsdc: row.net_usdc,
+            txHash: row.tx_hash,
+          });
+
+          if (!result.success) {
+            this.logger.warn(`attestation failed for payment ${row.id}: ${result.errorReason}`);
+            continue;
+          }
+
+          onchainPaymentId = result.onchainPaymentId ?? '';
+          this.pendingWriteBacks.set(row.id, onchainPaymentId);
         }
 
         await pool.query(
           `UPDATE payments SET onchain_payment_id = $2, attested_at = NOW() WHERE id = $1`,
-          [row.id, result.onchainPaymentId],
+          [row.id, onchainPaymentId],
         );
+        this.pendingWriteBacks.delete(row.id);
       } catch (err) {
         // One row's failure -- attestation or the write-back after it --
         // must never abort the rest of the batch. Left unattested; the
