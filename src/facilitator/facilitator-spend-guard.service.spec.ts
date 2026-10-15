@@ -2,6 +2,7 @@ import {
   FacilitatorHalted,
   FacilitatorSpendCapExceeded,
   FacilitatorSpendGuardService,
+  parseDailyCapUsdc,
 } from './facilitator-spend-guard.service';
 import { pool } from '../db/pool';
 
@@ -29,6 +30,25 @@ describe('FacilitatorSpendGuardService', () => {
     await expect(guard.checkAndRecordSpend(1, 'sweep')).rejects.toThrow(FacilitatorSpendCapExceeded);
     const status = await guard.status();
     expect(status.halted).toBe(true);
+    expect(status.capUsdc).toBe(0);
+    expect(status.capConfigError).toBeNull();
+  });
+
+  it('fails closed and surfaces capConfigError when FACILITATOR_DAILY_SPEND_CAP_USDC is non-numeric (#81)', async () => {
+    process.env.FACILITATOR_DAILY_SPEND_CAP_USDC = '5000usdc';
+    expect(parseDailyCapUsdc('5000usdc')).toEqual({
+      capUsdc: 0,
+      configError: expect.stringContaining('not a valid non-negative number'),
+    });
+
+    await expect(guard.checkAndRecordSpend(1, 'sweep', 'tx-invalid-cap')).rejects.toThrow(
+      FacilitatorSpendCapExceeded,
+    );
+    const status = await guard.status();
+    expect(status.halted).toBe(true);
+    expect(Number.isFinite(status.capUsdc)).toBe(true);
+    expect(status.capUsdc).toBe(0);
+    expect(status.capConfigError).toContain('not a valid non-negative number');
   });
 
   it('records spend under the cap and reflects it in status()', async () => {
@@ -38,6 +58,7 @@ describe('FacilitatorSpendGuardService', () => {
     expect(status.halted).toBe(false);
     expect(status.spentTodayUsdc).toBe(30);
     expect(status.capUsdc).toBe(100);
+    expect(status.capConfigError).toBeNull();
   });
 
   it('accumulates spend across calls against the same daily cap', async () => {
