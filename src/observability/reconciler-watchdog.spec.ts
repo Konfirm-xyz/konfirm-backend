@@ -1,3 +1,4 @@
+import * as sentry from './sentry';
 import { pool } from '../db/pool';
 import { ReconcilerWatchdogService } from './reconciler-watchdog.service';
 
@@ -36,5 +37,21 @@ describe('ReconcilerWatchdogService', () => {
     } else {
       expect(r.stalled).toBe(false);
     }
+  });
+
+  it('catches and logs query failures through the logger rather than throwing', async () => {
+    const captureSpy = jest.spyOn(sentry, 'captureException').mockImplementation(() => {});
+    const querySpy = jest
+      .spyOn(pool, 'query')
+      .mockImplementationOnce(() => Promise.reject(new Error('simulated db outage')));
+    const r = await svc.check();
+    expect(r.stalled).toBe(false);
+    expect(r.ageMinutes).toBeNull();
+    expect(errors.length).toBe(1);
+    expect(errors[0]).toMatch(/watchdog check failed: simulated db outage/);
+    expect(captureSpy).toHaveBeenCalledTimes(1);
+    expect(captureSpy).toHaveBeenCalledWith(expect.objectContaining({ message: 'simulated db outage' }));
+    querySpy.mockRestore();
+    captureSpy.mockRestore();
   });
 });
