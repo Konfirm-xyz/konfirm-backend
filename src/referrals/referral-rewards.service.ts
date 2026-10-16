@@ -45,15 +45,26 @@ export class ReferralRewardsService {
       );
 
       for (const { id, referrer_id: referrerId } of claimed) {
-        await pool.query(
+        const { rowCount } = await pool.query(
           `UPDATE merchants
            SET promo_fee_bps = GREATEST(FLOOR(fee_bps / $2), 0),
                promo_expires_at = NOW() + ($3 * INTERVAL '24 hours'),
                promo_volume_cap_usdc = NULL
-           WHERE id = $1`,
+           WHERE id = $1
+             AND (
+               promo_expires_at IS NULL
+               OR promo_expires_at <= NOW()
+               OR promo_fee_bps IS NULL
+               OR promo_fee_bps > GREATEST(FLOOR(fee_bps / $2), 0)
+             )`,
           [referrerId, REWARD_DISCOUNT_DIVISOR, REWARD_DAYS],
         );
-        this.logger.log(`granted referrer reward to merchant ${referrerId} for referral ${id}`);
+
+        if (rowCount === 1) {
+          this.logger.log(`granted referrer reward to merchant ${referrerId} for referral ${id}`);
+        } else {
+          this.logger.log(`kept active promo for merchant ${referrerId} instead of referral reward ${id}`);
+        }
       }
     } catch (err) {
       this.logger.error(`referral rewards sweep failed: ${err}`);
