@@ -13,6 +13,53 @@ const CHALLENGE_PERIOD_SECS = 86_400;
 // advisory lock this codebase might use in the future.
 const KEEPER_LOCK_KEY = 402_001;
 
+// Backoff and escalation parameters for failed keeper operations (#85).
+// Transient failures back off exponentially (4m -> 8m -> 16m -> 32m -> 60m cap)
+// with optional jitter so an RPC blip doesn't hammer the endpoint in lockstep
+// every 2 minutes. Terminal failures (simulation rejection, signing failure, or
+// confirmed on-chain transaction failure) quarantine the current operation
+// fingerprint for 24h unless the channel's claim/state changes first.
+export const TRANSIENT_BASE_BACKOFF_MS = 4 * 60 * 1000;
+export const MAX_TRANSIENT_BACKOFF_MS = 60 * 60 * 1000;
+export const TERMINAL_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+export const STUCK_FAILURE_THRESHOLD = 3;
+
+export type FailureKind = 'terminal' | 'transient';
+export type KeeperOperation = 'checkpoint' | 'finalize_close';
+
+export interface ChannelFailureState {
+  onchainChannelId: string;
+  operation: KeeperOperation;
+  fingerprint: string;
+  kind: FailureKind;
+  lastErrorReason: string;
+  consecutiveFailures: number;
+  lastFailedAt: number;
+  nextRetryAt: number;
+}
+
+/**
+ * Classifies `submitFacilitatorCall` error reasons into terminal vs transient:
+ * - `*_simulation_failed`: RPC reached the ledger and the contract/host rejected the call.
+ * - `*_signing_failed`: KMS or local key signer refused/failed to sign.
+ * - `*_transaction_failed`: Transaction landed and failed on-chain (or failed confirmation).
+ * - `*_submission_failed` / `*_failed` / `*_poll_timeout`: Transient RPC/network/mempool errors.
+ */
+export function classifyFailureReason(errorReason?: string): FailureKind {
+  if (!errorReason) return 'transient';
+  if (
+    errorReason.endsWith('_simulation_failed') ||
+    errorReason === 'simulation_failed' ||
+    errorReason.endsWith('_signing_failed') ||
+    errorReason === 'signing_failed' ||
+    errorReason.endsWith('_transaction_failed') ||
+    errorReason === 'transaction_failed'
+  ) {
+    return 'terminal';
+  }
+  return 'transient';
+}
+
 interface ChannelRow {
   onchain_channel_id: string;
   claimed: string;
@@ -51,6 +98,9 @@ interface ChannelRow {
 @Injectable()
 export class ChannelKeeperService {
   private readonly logger = new Logger(ChannelKeeperService.name);
+  private readonly failures = new Map<string, ChannelFailureState>();
+  private nowFn: () => number = () => Date.now();
+  private jitterFn: () => number = () => Math.random();
 
   constructor(private readonly channel: ChannelService) {}
 
@@ -71,6 +121,7 @@ export class ChannelKeeperService {
         await this.sweepFinalizeDue();
         await this.sweepWatchtower();
         await this.logIdleChannels();
+        this.logStuckChannels();
       } finally {
         await client.query('SELECT pg_advisory_unlock($1)', [KEEPER_LOCK_KEY]);
       }
@@ -110,6 +161,10 @@ export class ChannelKeeperService {
        WHERE status = 'closing' AND pending_amount > claimed AND pending_signature IS NOT NULL`,
     );
     for (const row of rows) {
+      const fingerprint = this.checkpointFingerprint(row);
+      if (!this.shouldAttempt('checkpoint', row.onchain_channel_id, fingerprint)) {
+        continue;
+      }
       this.logger.warn(`watchtower: defending pending claim for closing channel ${row.onchain_channel_id}`);
       await this.checkpointAndResync(row);
     }
@@ -125,6 +180,11 @@ export class ChannelKeeperService {
   // mechanism, so a crash between the on-chain confirmation and this write
   // has to be self-healing on the next sweep regardless.
   private async checkpointAndResync(row: ChannelRow): Promise<void> {
+    const fingerprint = this.checkpointFingerprint(row);
+    if (!this.shouldAttempt('checkpoint', row.onchain_channel_id, fingerprint)) {
+      return;
+    }
+
     const onchainChannelId = BigInt(row.onchain_channel_id);
     const result = await this.channel.checkpointChannel({
       onchainChannelId,
@@ -132,10 +192,15 @@ export class ChannelKeeperService {
       nonce: BigInt(row.pending_nonce),
       signature: Buffer.from(row.pending_signature as string, 'hex'),
     });
-    if (!result.success) {
-      this.logger.warn(`checkpoint failed for channel ${row.onchain_channel_id}: ${result.errorReason}`);
+    const synced = await this.resyncFromChain(onchainChannelId);
+    const resolvedOnChain = synced !== null && synced.claimed >= BigInt(row.pending_amount);
+
+    if (result.success || resolvedOnChain) {
+      this.clearFailure('checkpoint', row.onchain_channel_id);
+      return;
     }
-    await this.resyncFromChain(onchainChannelId);
+
+    this.recordFailure('checkpoint', row.onchain_channel_id, fingerprint, result.errorReason);
   }
 
   // Any channel mid-close past its challenge period gets finalized —
@@ -149,12 +214,115 @@ export class ChannelKeeperService {
       [CHALLENGE_PERIOD_SECS],
     );
     for (const row of rows) {
+      const fingerprint = `closing:${row.closing_at}`;
+      if (!this.shouldAttempt('finalize_close', row.onchain_channel_id, fingerprint)) {
+        continue;
+      }
       const onchainChannelId = BigInt(row.onchain_channel_id);
       const result = await this.channel.finalizeCloseChannel(onchainChannelId);
-      if (!result.success) {
-        this.logger.warn(`finalize_close failed for channel ${row.onchain_channel_id}: ${result.errorReason}`);
+      const synced = await this.resyncFromChain(onchainChannelId);
+      const resolvedOnChain = synced !== null && synced.mappedStatus === 'closed';
+
+      if (result.success || resolvedOnChain) {
+        this.clearFailure('finalize_close', row.onchain_channel_id);
+        continue;
       }
-      await this.resyncFromChain(onchainChannelId);
+
+      this.recordFailure('finalize_close', row.onchain_channel_id, fingerprint, result.errorReason);
+    }
+  }
+
+  private failureKey(operation: KeeperOperation, onchainChannelId: string): string {
+    return `${operation}:${onchainChannelId}`;
+  }
+
+  private checkpointFingerprint(row: ChannelRow): string {
+    return `${row.pending_amount}:${row.pending_nonce}:${row.pending_signature ?? ''}`;
+  }
+
+  private shouldAttempt(operation: KeeperOperation, onchainChannelId: string, fingerprint: string): boolean {
+    const key = this.failureKey(operation, onchainChannelId);
+    const existing = this.failures.get(key);
+    if (!existing) return true;
+
+    // A newer claim or updated channel state supersedes any previous failure
+    // recorded against an older fingerprint.
+    if (existing.fingerprint !== fingerprint) {
+      this.failures.delete(key);
+      return true;
+    }
+
+    return this.nowFn() >= existing.nextRetryAt;
+  }
+
+  private clearFailure(operation: KeeperOperation, onchainChannelId: string): void {
+    this.failures.delete(this.failureKey(operation, onchainChannelId));
+  }
+
+  private recordFailure(
+    operation: KeeperOperation,
+    onchainChannelId: string,
+    fingerprint: string,
+    errorReason?: string,
+  ): void {
+    const reason = errorReason ?? `${operation}_failed`;
+    const kind = classifyFailureReason(reason);
+    const key = this.failureKey(operation, onchainChannelId);
+    const prev = this.failures.get(key);
+    const consecutiveFailures = prev && prev.fingerprint === fingerprint ? prev.consecutiveFailures + 1 : 1;
+    const now = this.nowFn();
+
+    let backoffMs: number;
+    if (kind === 'terminal') {
+      backoffMs = TERMINAL_COOLDOWN_MS;
+    } else {
+      const expBackoff = Math.min(
+        TRANSIENT_BASE_BACKOFF_MS * Math.pow(2, consecutiveFailures - 1),
+        MAX_TRANSIENT_BACKOFF_MS,
+      );
+      // Up to +25% positive jitter to avoid synchronized thundering-herd retries
+      // across channels recovering from the same RPC outage.
+      const jitterMs = Math.floor(expBackoff * 0.25 * this.jitterFn());
+      backoffMs = Math.min(expBackoff + jitterMs, MAX_TRANSIENT_BACKOFF_MS);
+    }
+
+    const state: ChannelFailureState = {
+      onchainChannelId,
+      operation,
+      fingerprint,
+      kind,
+      lastErrorReason: reason,
+      consecutiveFailures,
+      lastFailedAt: now,
+      nextRetryAt: now + backoffMs,
+    };
+    this.failures.set(key, state);
+
+    if (kind === 'terminal') {
+      this.logger.error(
+        `[terminal] ${operation} failed for channel ${onchainChannelId}: ${reason} ` +
+          `(attempt ${consecutiveFailures}, cooldown ${Math.round(backoffMs / 1000)}s)`,
+      );
+    } else {
+      this.logger.warn(
+        `[transient] ${operation} failed for channel ${onchainChannelId}: ${reason} ` +
+          `(attempt ${consecutiveFailures}, backoff ${Math.round(backoffMs / 1000)}s)`,
+      );
+    }
+  }
+
+  // Surfaces channels that have either hit a terminal failure or exceeded
+  // STUCK_FAILURE_THRESHOLD consecutive transient failures, matching how
+  // logIdleChannels() surfaces open channels requiring operator attention.
+  private logStuckChannels(): void {
+    for (const state of this.failures.values()) {
+      if (state.kind === 'terminal' || state.consecutiveFailures >= STUCK_FAILURE_THRESHOLD) {
+        this.logger.error(
+          `channel ${state.onchainChannelId} stuck in ${state.operation} ` +
+            `[${state.kind}] after ${state.consecutiveFailures} consecutive failure(s) ` +
+            `(last reason: ${state.lastErrorReason})`,
+        );
+      }
     }
   }
 
@@ -166,7 +334,9 @@ export class ChannelKeeperService {
   // trusting it, the same quirk Arbiter's decodeStatus() documents for its
   // own escrow contract, not assumed to be the same just because it's
   // "probably similar."
-  private async resyncFromChain(onchainChannelId: bigint): Promise<void> {
+  private async resyncFromChain(
+    onchainChannelId: bigint,
+  ): Promise<{ claimed: bigint; mappedStatus: string | null } | null> {
     try {
       const info = (await this.channel.getChannelInfoOnChain(onchainChannelId)) as {
         claimed: bigint;
@@ -180,11 +350,13 @@ export class ChannelKeeperService {
          WHERE onchain_channel_id = $1`,
         [onchainChannelId.toString(), info.claimed.toString(), mappedStatus],
       );
+      return { claimed: BigInt(info.claimed), mappedStatus };
     } catch (err) {
       // A failed resync just leaves the row stale until the next sweep —
       // never let an on-chain read failure here throw out of the sweep and
       // skip whatever else was queued.
       this.logger.error(`resync failed for channel ${onchainChannelId}: ${err}`);
+      return null;
     }
   }
 
