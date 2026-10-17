@@ -98,6 +98,7 @@ real until confirmed" design means a stalled reconciler makes real money look li
 ```bash
 ps aux | grep "konfirm-reconciler watch"
 psql -tAc "SELECT * FROM reconciler_state;" konfirm_dev
+psql -tAc "SELECT merchant_id, paging_token, tx_hash, failure_count, status, error_message FROM reconciler_skipped_ops ORDER BY created_at DESC;" konfirm_dev
 ```
 Compare `updated_at` on the cursor row against the current time — if it hasn't moved in longer than
 the poll interval (default 3s) times a large margin, the reconciler isn't running or is stuck.
@@ -109,9 +110,16 @@ the poll interval (default 3s) times a large margin, the reconciler isn't runnin
   locally, wrap it in `while true; do cargo run -- watch ...; done` as the same safety net.
 - If it's running but the cursor is stale: check its stdout for repeated `Horizon request failed,
   retrying after backoff` — that's incident #1 again, propagating downstream.
+- **Poison-pill / permanently malformed operations (`watch-all`):** If a single payment operation fails
+  to parse or process 3 consecutive times at the exact same `paging_token`, `watch-all` automatically
+  records the raw operation payload and error trace into `reconciler_skipped_ops` (`status = 'pending_review'`),
+  emits a `critical` notification in `GET /admin/notifications` (and `GET /admin/reconciler/skipped-ops`),
+  and advances that merchant's cursor past the malformed op so subsequent payments are not blocked.
+  Inspect `raw_payload` and `error_message` in `reconciler_skipped_ops` to determine whether the op can
+  be ignored (`status = 'ignored'`) or reprocessed (`status = 'reprocessed'`) after fixing any parser gap.
 - **Never** manually `set-cursor` forward past unprocessed payments to "fix" a stuck reconciler — that
-  permanently skips real transactions. `set-cursor` is for deliberate replay/recovery, documented as
-  such in the code, not a routine unstick command.
+  permanently skips real transactions without recording them to `reconciler_skipped_ops`. `set-cursor`
+  is for deliberate replay/recovery, documented as such in the code, not a routine unstick command.
 
 ## Weekly review
 

@@ -5,7 +5,7 @@ export type NotificationSeverity = 'critical' | 'warning' | 'info';
 
 export interface AdminNotification {
   id: string;
-  type: 'x402_settlement' | 'payment' | 'withdrawal' | 'compliance' | 'attestation';
+  type: 'x402_settlement' | 'payment' | 'withdrawal' | 'compliance' | 'attestation' | 'reconciler_skipped_op';
   severity: NotificationSeverity;
   message: string;
   created_at: string;
@@ -69,6 +69,15 @@ export class AdminNotificationsService {
                 created_at
          FROM payments
          WHERE status = 'paid' AND attested_at IS NULL AND created_at < NOW() - INTERVAL '10 minutes'
+       )
+       UNION ALL
+       (
+         SELECT id, 'reconciler_skipped_op' AS type, 'critical' AS severity,
+                'Reconciler skipped malformed payment op ' || paging_token
+                  || ' after ' || failure_count || ' consecutive failures (' || LEFT(error_message, 80) || ')' AS message,
+                created_at
+         FROM reconciler_skipped_ops
+         WHERE status = 'pending_review'
        )
        ORDER BY created_at DESC
        LIMIT $1`,
