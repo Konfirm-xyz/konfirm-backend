@@ -50,7 +50,7 @@ jobs:
           # instead of the base branch. This ensures we test the actual fork code.
           ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.ref }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '20'
           cache: 'npm'
