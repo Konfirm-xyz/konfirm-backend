@@ -44,7 +44,7 @@ jobs:
       JWT_SECRET: ci-only-secret-never-used-outside-this-workflow
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # For pull_request_target events (fork PRs), checkout the PR's head commit
           # instead of the base branch. This ensures we test the actual fork code.
