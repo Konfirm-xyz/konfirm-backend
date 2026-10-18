@@ -514,7 +514,11 @@ export class ChannelService {
 
       const confirmed = await this.pollForTransaction(server, sentHash);
       if (!confirmed.success) {
-        return { success: false, errorReason: `${logLabel}_transaction_failed`, transaction: sentHash };
+        // A poll that ran out of attempts is not an on-chain rejection: the
+        // transaction may still land. Reported separately so the keeper can
+        // treat it as transient rather than as a definite failure.
+        const errorReason = confirmed.timedOut ? `${logLabel}_confirmation_timeout` : `${logLabel}_transaction_failed`;
+        return { success: false, errorReason, transaction: sentHash };
       }
       return { success: true, transaction: sentHash, returnValue: confirmed.returnValue };
     });
@@ -525,7 +529,7 @@ export class ChannelService {
     txHash: string,
     maxAttempts = 15,
     delayMs = 1000,
-  ): Promise<{ success: boolean; returnValue?: unknown }> {
+  ): Promise<{ success: boolean; timedOut?: boolean; returnValue?: unknown }> {
     for (let i = 0; i < maxAttempts; i++) {
       try {
         const result = await server.getTransaction(txHash);
@@ -540,6 +544,6 @@ export class ChannelService {
       }
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
-    return { success: false };
+    return { success: false, timedOut: true };
   }
 }

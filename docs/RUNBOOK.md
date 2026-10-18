@@ -113,6 +113,13 @@ the poll interval (default 3s) times a large margin, the reconciler isn't runnin
   permanently skips real transactions. `set-cursor` is for deliberate replay/recovery, documented as
   such in the code, not a routine unstick command.
 
+**Second payment to the same session (not a stall):** a payer who sends twice to the same muxed
+address (double-send, wallet retry, top-up) no longer stops the reconciler. The extra payment is
+recorded as `status = 'held'`, `flag_reason = 'duplicate_session'`, with a `second payment to an
+already-paid session` warning in the reconciler log, and the cursor moves on. It is never dropped:
+review it in the admin payments list and set its status by hand (refund, or mark paid if the top-up
+was intended). It doesn't count toward paid volume or owed fees until an admin changes its status.
+
 ## Accepted dependency advisories (reconciler)
 
 `cd reconciler && cargo audit` is expected to report exactly one accepted item after a plain

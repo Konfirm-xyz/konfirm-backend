@@ -571,6 +571,16 @@ async fn poll_once(
             );
             found_any = true;
 
+            if recorded.duplicate_session {
+                tracing::warn!(
+                    payment_id = %recorded.id,
+                    merchant_id = %merchant.id,
+                    muxed_id,
+                    tx_hash = %op.transaction_hash,
+                    "second payment to an already-paid session — recorded as held (duplicate_session) for review"
+                );
+            }
+
             // Already flagged and held via the cheap local check above —
             // no need for the slower on-chain check too.
             if !recorded.locally_blocked {

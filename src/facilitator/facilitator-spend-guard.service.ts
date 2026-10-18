@@ -1,18 +1,43 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import type { PoolClient } from 'pg';
 import { pool } from '../db/pool';
 
 const HALT_KEY = 'halted_at';
 const HALT_REASON_KEY = 'halt_reason';
 const SPEND_GUARD_LOCK_KEY = 402_005;
+const CAP_ENV_VAR = 'FACILITATOR_DAILY_SPEND_CAP_USDC';
+
+// A plain non-negative decimal: "5000", "5000.50". Deliberately stricter than
+// Number(), which also accepts "Infinity", "0x10" and "1e9" -- any of those
+// in this env var is far more likely a mistake than an intended cap.
+const CAP_PATTERN = /^\d+(\.\d+)?$/;
+
+export interface DailyCapConfig {
+  /** The cap actually enforced. Always a finite number, never NaN. */
+  capUsdc: number;
+  /** Set when the env var is present but unusable; the guard then fails closed. */
+  configError: string | null;
+}
 
 // A tunable ceiling, not a hardcoded guess -- how much daily exposure is
 // acceptable is an operational/business call, not something to bake into
 // code. Deliberately no fallback that silently disables the cap (an unset
 // env var defaults to a conservative $0, meaning "not configured" fails
 // closed too, consistent with everything else in this guard).
-function dailyCapUsdc(): number {
-  return Number(process.env.FACILITATOR_DAILY_SPEND_CAP_USDC ?? '0');
+//
+// A set-but-unparseable value ("5000usdc", a stray quote) must fail closed
+// the same way. Number() would return NaN for it, and every `x > NaN`
+// comparison is false -- the cap check would silently never trip.
+export function dailyCapConfig(): DailyCapConfig {
+  const raw = process.env[CAP_ENV_VAR];
+  if (raw === undefined) return { capUsdc: 0, configError: null };
+  if (!CAP_PATTERN.test(raw.trim())) {
+    return {
+      capUsdc: 0,
+      configError: `${CAP_ENV_VAR}=${JSON.stringify(raw)} is not a valid non-negative USDC amount -- refusing all signing (fail closed)`,
+    };
+  }
+  return { capUsdc: Number(raw.trim()), configError: null };
 }
 
 export class FacilitatorSpendCapExceeded extends Error {}
@@ -35,8 +60,17 @@ export class FacilitatorHalted extends Error {}
  * looking at it, not an automatic reset at midnight.
  */
 @Injectable()
-export class FacilitatorSpendGuardService {
+export class FacilitatorSpendGuardService implements OnModuleInit {
   private readonly logger = new Logger(FacilitatorSpendGuardService.name);
+
+  // Surfaces a broken cap at boot instead of waiting for the first sweep to
+  // trip over it. Logged, not thrown: signing already fails closed on a bad
+  // value, and crashing the whole API over it would take down every
+  // unrelated endpoint along with the sweeps.
+  onModuleInit(): void {
+    const { configError } = dailyCapConfig();
+    if (configError) this.logger.error(`facilitator spend cap misconfigured: ${configError}`);
+  }
 
   async checkAndRecordSpend(amountUsdc: number, operation: string, reference?: string): Promise<void> {
     const client = await pool.connect();
@@ -56,23 +90,20 @@ export class FacilitatorSpendGuardService {
       if (halted) {
         throw new FacilitatorHalted(
           `facilitator signing is halted (since ${halted.value}) pending manual review -- ` +
-    try {
-      await client.query('BEGIN');
-      await client.query("SELECT pg_advisory_xact_lock(hashtext('facilitator-spend-guard'))");
-      const halted = await client.query<{ value: string }>('SELECT value FROM facilitator_state WHERE key = $1', [HALT_KEY]);
-      if (halted.rows[0]) {
-        await client.query('ROLLBACK');
-        throw new FacilitatorHalted(
-          `facilitator signing is halted (since ${halted.rows[0].value}) pending manual review -- ` +
             'see GET /admin/facilitator/status, resume via POST /admin/facilitator/resume',
         );
       }
 
-      const spendResult = await client.query<{ total: string }>(
-        `SELECT COALESCE(SUM(amount_usdc), 0) AS total FROM facilitator_spend_log WHERE created_at >= date_trunc('day', NOW())`,
-      );
       const spentToday = Number(spendResult.rows[0].total);
-      const cap = dailyCapUsdc();
+      const { capUsdc: cap, configError } = dailyCapConfig();
+      if (configError) {
+        await this.halt(client, `cap misconfigured: ${configError}`);
+        await client.query('COMMIT');
+        transactionOpen = false;
+        throw new FacilitatorSpendCapExceeded(
+          `refusing to sign this $${amountUsdc} ${operation}: ${configError} -- halting further signing pending manual review`,
+        );
+      }
       if (spentToday + amountUsdc > cap) {
         await this.halt(
           client,
@@ -81,11 +112,6 @@ export class FacilitatorSpendGuardService {
         );
         await client.query('COMMIT');
         transactionOpen = false;
-          `daily cap exceeded: attempted $${amountUsdc} (${operation}${reference ? ` ${reference}` : ''}) ` +
-            `with $${spentToday} already spent today against a $${cap} cap`,
-          client,
-        );
-        await client.query('COMMIT');
         throw new FacilitatorSpendCapExceeded(
           `signing this $${amountUsdc} ${operation} would exceed the daily cap of $${cap} ` +
             `($${spentToday} already spent today) -- halting further signing pending manual review`,
@@ -122,7 +148,14 @@ export class FacilitatorSpendGuardService {
     );
   }
 
-  async status(): Promise<{ halted: boolean; haltedAt: string | null; haltReason: string | null; spentTodayUsdc: number; capUsdc: number }> {
+  async status(): Promise<{
+    halted: boolean;
+    haltedAt: string | null;
+    haltReason: string | null;
+    spentTodayUsdc: number;
+    capUsdc: number;
+    capConfigError: string | null;
+  }> {
     const [haltedAt, reason, spend] = await Promise.all([
       pool.query<{ value: string }>('SELECT value FROM facilitator_state WHERE key = $1', [HALT_KEY]),
       pool.query<{ value: string }>('SELECT value FROM facilitator_state WHERE key = $1', [HALT_REASON_KEY]),
@@ -130,18 +163,26 @@ export class FacilitatorSpendGuardService {
         `SELECT COALESCE(SUM(amount_usdc), 0) AS total FROM facilitator_spend_log WHERE created_at >= date_trunc('day', NOW())`,
       ),
     ]);
+    const cap = dailyCapConfig();
     return {
       halted: haltedAt.rows.length > 0,
       haltedAt: haltedAt.rows[0]?.value ?? null,
       haltReason: reason.rows[0]?.value ?? null,
       spentTodayUsdc: Number(spend.rows[0].total),
-      capUsdc: dailyCapUsdc(),
+      capUsdc: cap.capUsdc,
+      capConfigError: cap.configError,
     };
   }
 
   /** Explicit admin action only -- see the module comment for why this
    * never clears itself. */
-  async resume(): Promise<{ haltedAt: string | null; haltReason: string | null; capUsdc: number; spentTodayUsdc: number }> {
+  async resume(): Promise<{
+    haltedAt: string | null;
+    haltReason: string | null;
+    capUsdc: number;
+    capConfigError: string | null;
+    spentTodayUsdc: number;
+  }> {
     // RETURNING captures exactly what this DELETE cleared, so the caller can
     // put it in the audit log -- otherwise the halt reason is gone for good.
     const [cleared, spend] = await Promise.all([
@@ -154,10 +195,12 @@ export class FacilitatorSpendGuardService {
       ),
     ]);
     const byKey = new Map(cleared.rows.map((r) => [r.key, r.value]));
+    const cap = dailyCapConfig();
     return {
       haltedAt: byKey.get(HALT_KEY) ?? null,
       haltReason: byKey.get(HALT_REASON_KEY) ?? null,
-      capUsdc: dailyCapUsdc(),
+      capUsdc: cap.capUsdc,
+      capConfigError: cap.configError,
       spentTodayUsdc: Number(spend.rows[0].total),
     };
   }
