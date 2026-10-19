@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, Logger, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, Logger, NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { createHash, randomBytes } from 'node:crypto';
 import * as bcrypt from 'bcryptjs';
 import * as jwt from 'jsonwebtoken';
@@ -315,6 +315,174 @@ export class AuthService {
           },
       referrals,
     };
+  }
+
+  // ---- Profile update methods (issue #38) ----
+
+  // Name changes are low-risk: no re-auth required.  The JWT is re-issued so
+  // the client's in-memory claims stay in sync without a full logout/login.
+  async updateName(
+    merchantId: string,
+    newName: string,
+  ): Promise<{ token: string; merchant: MerchantClaims }> {
+    const { rows } = await pool.query(
+      `UPDATE merchants SET name = $2, updated_at = NOW()
+       WHERE id = $1
+       RETURNING id, email, name, stellar_base_address, session_version`,
+      [merchantId, newName],
+    );
+    if (rows.length === 0) throw new NotFoundException('merchant not found');
+    const row = rows[0];
+    const merchant: MerchantClaims = {
+      id: row.id,
+      email: row.email,
+      name: row.name,
+      stellar_base_address: row.stellar_base_address,
+    };
+    return { token: this.issueToken(merchant, row.session_version), merchant };
+  }
+
+  // Sends a verification token to the *new* address.  The actual email swap
+  // doesn't happen until confirmEmailChange() is called.  Sending to the new
+  // address (not the old one) confirms control of the destination before
+  // routing any future correspondence there.
+  //
+  // A new request while a pending one is open replaces it via
+  // DELETE+INSERT so only one live token exists per merchant at a time.
+  async requestEmailChange(merchantId: string, newEmail: string): Promise<void> {
+    newEmail = normalizeEmail(newEmail);
+
+    // Reject if the new address is already taken by another merchant.
+    const { rows: conflict } = await pool.query(
+      'SELECT id FROM merchants WHERE email = $1 AND id <> $2',
+      [newEmail, merchantId],
+    );
+    if (conflict.length > 0) {
+      throw new ConflictException('an account with this email already exists');
+    }
+
+    // Reject if the new address is the same as the current one.
+    const { rows: current } = await pool.query('SELECT email FROM merchants WHERE id = $1', [merchantId]);
+    if (current.length === 0) throw new NotFoundException('merchant not found');
+    if (current[0].email === newEmail) {
+      throw new BadRequestException('new email must differ from the current email');
+    }
+
+    const appUrl = process.env.APP_URL ?? 'http://localhost:3000';
+    if (process.env.NODE_ENV === 'production' && !process.env.APP_URL) {
+      throw new Error('APP_URL must be set in production to build email-change links');
+    }
+
+    // Replace any existing pending request for this merchant.
+    await pool.query(
+      'DELETE FROM email_change_tokens WHERE merchant_id = $1',
+      [merchantId],
+    );
+
+    const token = randomBytes(32).toString('base64url');
+    await pool.query(
+      `INSERT INTO email_change_tokens (merchant_id, token_hash, pending_email, expires_at)
+       VALUES ($1, $2, $3, NOW() + INTERVAL '30 minutes')`,
+      [merchantId, sha256(token), newEmail],
+    );
+
+    await this.mailer.send({
+      to: newEmail,
+      subject: 'Confirm your new Konfirm email address',
+      text:
+        `You requested a Konfirm email change.  Confirm your new address by visiting:\n\n` +
+        `${appUrl}/confirm-email?token=${token}\n\n` +
+        `This link expires in 30 minutes and works once.  ` +
+        `Your current email is unchanged until you click it.  ` +
+        `If you didn't request this, you can ignore this email safely.`,
+    });
+  }
+
+  // Consumes the token, atomically swaps the email, and re-issues the JWT so
+  // the client's claims reflect the new address without requiring a re-login.
+  // Bumps session_version to sign out every other session — a leftover session
+  // issued under the old email would otherwise present stale identity.
+  async confirmEmailChange(
+    token: string,
+  ): Promise<{ token: string; merchant: MerchantClaims }> {
+    // Consume the token atomically — two concurrent submissions can't both win.
+    const { rows: tokenRows } = await pool.query(
+      `UPDATE email_change_tokens SET used_at = NOW()
+       WHERE token_hash = $1 AND used_at IS NULL AND expires_at > NOW()
+       RETURNING merchant_id, pending_email`,
+      [sha256(token)],
+    );
+    if (tokenRows.length === 0) {
+      throw new BadRequestException('this confirmation link is invalid or has expired — request a new one');
+    }
+    const { merchant_id: merchantId, pending_email: newEmail } = tokenRows[0];
+
+    // Double-check the target address is still free (another merchant could
+    // have signed up with it during the 30-minute window).
+    const { rows: conflict } = await pool.query(
+      'SELECT id FROM merchants WHERE email = $1 AND id <> $2',
+      [newEmail, merchantId],
+    );
+    if (conflict.length > 0) {
+      throw new ConflictException(
+        'this email address is now taken — please start the change process again',
+      );
+    }
+
+    const { rows } = await pool.query(
+      `UPDATE merchants
+       SET email = $2, session_version = session_version + 1, updated_at = NOW()
+       WHERE id = $1
+       RETURNING id, email, name, stellar_base_address, session_version`,
+      [merchantId, newEmail],
+    );
+    if (rows.length === 0) throw new NotFoundException('merchant not found');
+    const row = rows[0];
+    const merchant: MerchantClaims = {
+      id: row.id,
+      email: row.email,
+      name: row.name,
+      stellar_base_address: row.stellar_base_address,
+    };
+    this.logger.log(`email changed for merchant ${merchantId} → ${newEmail}`);
+    return { token: this.issueToken(merchant, row.session_version), merchant };
+  }
+
+  // Stellar address changes are high-value (all future payments follow this
+  // field), so they require the merchant to re-supply their password.  The JWT
+  // is re-issued so the client's stellar_base_address claim is immediately
+  // correct.
+  async updateStellarAddress(
+    merchantId: string,
+    currentPassword: string,
+    newAddress: string,
+  ): Promise<{ token: string; merchant: MerchantClaims }> {
+    const { rows } = await pool.query(
+      'SELECT password_hash, session_version FROM merchants WHERE id = $1',
+      [merchantId],
+    );
+    if (rows.length === 0) throw new NotFoundException('merchant not found');
+
+    const ok = await bcrypt.compare(currentPassword, rows[0].password_hash);
+    if (!ok) {
+      throw new UnauthorizedException('current password is incorrect');
+    }
+
+    const { rows: updated } = await pool.query(
+      `UPDATE merchants SET stellar_base_address = $2, updated_at = NOW()
+       WHERE id = $1
+       RETURNING id, email, name, stellar_base_address, session_version`,
+      [merchantId, newAddress],
+    );
+    const row = updated[0];
+    const merchant: MerchantClaims = {
+      id: row.id,
+      email: row.email,
+      name: row.name,
+      stellar_base_address: row.stellar_base_address,
+    };
+    this.logger.log(`stellar_base_address updated for merchant ${merchantId}`);
+    return { token: this.issueToken(merchant, row.session_version), merchant };
   }
 
   verifyToken(token: string): MerchantClaims {

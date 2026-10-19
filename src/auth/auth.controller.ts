@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, Logger, Post, Req, Res, UseGuards } from '@nestjs/common';
+import { Body, ConflictException, Controller, Get, HttpCode, Logger, Patch, Post, Req, Res, UseGuards } from '@nestjs/common';
 import { ApiBody, ApiCookieAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
@@ -51,6 +51,29 @@ const forgotPasswordSchema = z.object({
 const resetPasswordSchema = z.object({
   token: z.string().min(20).max(200),
   password: passwordSchema,
+});
+
+// Tighter limit for flows that send email (same ceiling as forgot-password).
+const EMAIL_CHANGE_THROTTLE = { default: { limit: 5, ttl: 60_000 } };
+
+const updateNameSchema = z.object({
+  name: z.string().min(1).max(200),
+});
+
+const requestEmailChangeSchema = z.object({
+  email: emailSchema,
+});
+
+const confirmEmailChangeSchema = z.object({
+  token: z.string().min(20).max(200),
+});
+
+// Full Stellar G-address validation matches the pattern used at signup.
+const updateStellarAddressSchema = z.object({
+  stellar_base_address: z
+    .string()
+    .regex(/^G[A-Z2-7]{55}$/, 'must be a valid Stellar G... address'),
+  current_password: z.string().min(1),
 });
 
 // 30 days, matching the JWT's own expiry in auth.service.ts.
@@ -185,6 +208,132 @@ export class AuthController {
   @ApiResponse({ status: 401, description: 'Not authenticated.' })
   myReferrals(@Req() req: AuthedRequest) {
     return this.auth.myReferrals(req.merchant.id);
+  }
+
+  // --- Profile updates (issue #38) ---
+
+  // Name change: no re-auth, low risk, re-issues the JWT in place so the
+  // client's claims are immediately current without a full logout/login cycle.
+  @Patch('me')
+  @UseGuards(AuthGuard)
+  @ApiCookieAuth('merchant-session')
+  @ApiOperation({
+    summary: 'Update merchant name',
+    description:
+      'Updates the authenticated merchant\'s display name. ' +
+      'Re-issues the session cookie with the updated claims so the client does not need to re-login.',
+  })
+  @ApiBody(zodBody(updateNameSchema, 'Update name request'))
+  @ApiResponse({ status: 200, description: 'Updated merchant object; fresh konfirm_session cookie set.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated.' })
+  @ApiResponse({ status: 422, description: 'Validation error.' })
+  async updateName(
+    @Body(new ZodValidationPipe(updateNameSchema)) body: z.infer<typeof updateNameSchema>,
+    @Req() req: AuthedRequest,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const { token, merchant } = await this.auth.updateName(req.merchant.id, body.name);
+    this.setSessionCookie(res, token);
+    return { merchant };
+  }
+
+  // Step 1 of 2 for email change: sends a verification token to the *new*
+  // address.  Always returns { ok: true } whether the address is already
+  // taken — prevents enumeration of other accounts via the change flow.
+  @Post('me/request-email-change')
+  @HttpCode(200)
+  @UseGuards(AuthGuard)
+  @Throttle(EMAIL_CHANGE_THROTTLE)
+  @ApiCookieAuth('merchant-session')
+  @ApiOperation({
+    summary: 'Request an email address change',
+    description:
+      'Sends a verification link to the requested new email address. ' +
+      'The actual swap does not happen until the link is confirmed via POST /auth/me/confirm-email-change. ' +
+      'A second request before confirmation replaces the first pending token. ' +
+      'Returns { ok: true } whether the address is already taken (prevents enumeration). ' +
+      'Rate-limited to 5 req/min per IP.',
+  })
+  @ApiBody(zodBody(requestEmailChangeSchema, 'Request email change'))
+  @ApiResponse({ status: 200, description: 'Always returns { ok: true }.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated.' })
+  async requestEmailChange(
+    @Body(new ZodValidationPipe(requestEmailChangeSchema)) body: z.infer<typeof requestEmailChangeSchema>,
+    @Req() req: AuthedRequest,
+  ) {
+    try {
+      await this.auth.requestEmailChange(req.merchant.id, body.email);
+    } catch (err) {
+      // Surface validation errors (same-as-current, bad format) but swallow
+      // conflict errors to avoid telling the caller whether that address
+      // belongs to another merchant.
+      if (err instanceof ConflictException) {
+        this.logger.warn(
+          `email-change request silently suppressed conflict for merchant ${req.merchant.id}`,
+        );
+      } else {
+        throw err;
+      }
+    }
+    return { ok: true };
+  }
+
+  // Step 2 of 2: merchant clicks the link from their new inbox.  Swaps the
+  // email, bumps session_version (signs out every other device), and re-issues
+  // the session cookie with the new claims.
+  @Post('me/confirm-email-change')
+  @HttpCode(200)
+  @Throttle(AUTH_THROTTLE)
+  @ApiOperation({
+    summary: 'Confirm an email address change',
+    description:
+      'Consumes the one-time token sent to the new email address and makes the swap permanent. ' +
+      'Bumps session_version, signing out every other active session. ' +
+      'Re-issues the session cookie with the updated email claim.',
+  })
+  @ApiBody(zodBody(confirmEmailChangeSchema, 'Confirm email change'))
+  @ApiResponse({ status: 200, description: 'Email swapped; updated merchant object and fresh konfirm_session cookie.' })
+  @ApiResponse({ status: 400, description: 'Token invalid, expired, or already used.' })
+  @ApiResponse({ status: 409, description: 'New email was taken in the meantime — restart the flow.' })
+  async confirmEmailChange(
+    @Body(new ZodValidationPipe(confirmEmailChangeSchema)) body: z.infer<typeof confirmEmailChangeSchema>,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const { token, merchant } = await this.auth.confirmEmailChange(body.token);
+    this.setSessionCookie(res, token);
+    return { merchant };
+  }
+
+  // Stellar address change: requires the current password because every future
+  // payout follows this field.  Re-issues the JWT so the client's claim is
+  // immediately correct.
+  @Patch('me/stellar-address')
+  @UseGuards(AuthGuard)
+  @Throttle(AUTH_THROTTLE)
+  @ApiCookieAuth('merchant-session')
+  @ApiOperation({
+    summary: 'Update the merchant\'s Stellar payout address',
+    description:
+      'Replaces the merchant\'s stellar_base_address. ' +
+      'Requires the current password as re-authentication — all future payments route to this address. ' +
+      'Re-issues the session cookie with the updated claim.',
+  })
+  @ApiBody(zodBody(updateStellarAddressSchema, 'Update Stellar address'))
+  @ApiResponse({ status: 200, description: 'Updated merchant object; fresh konfirm_session cookie set.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated or current_password incorrect.' })
+  @ApiResponse({ status: 422, description: 'Validation error (invalid Stellar address format).' })
+  async updateStellarAddress(
+    @Body(new ZodValidationPipe(updateStellarAddressSchema)) body: z.infer<typeof updateStellarAddressSchema>,
+    @Req() req: AuthedRequest,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const { token, merchant } = await this.auth.updateStellarAddress(
+      req.merchant.id,
+      body.current_password,
+      body.stellar_base_address,
+    );
+    this.setSessionCookie(res, token);
+    return { merchant };
   }
 
   private setSessionCookie(res: Response, token: string) {
