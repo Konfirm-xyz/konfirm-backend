@@ -109,6 +109,13 @@ the poll interval (default 3s) times a large margin, the reconciler isn't runnin
   locally, wrap it in `while true; do cargo run -- watch ...; done` as the same safety net.
 - If it's running but the cursor is stale: check its stdout for repeated `Horizon request failed,
   retrying after backoff` — that's incident #1 again, propagating downstream.
+- **Hung, not crashed:** the reconciler can't wedge silently anymore. Every Postgres call is bounded
+  (`acquire_timeout` 10s, `statement_timeout` 30s on every connection — `reconciler/src/store.rs`), so
+  a stalled query surfaces as a `poll failed — backing off` warning instead of blocking forever. And
+  `watch-all` runs a liveness watchdog on its own OS thread: if neither the merchant-refresh loop nor
+  any merchant's poll loop has ticked in 600s, it logs `no reconciler loop has ticked` and exits 1, so
+  Railway's `restartPolicyType: ALWAYS` restarts it. Seeing that line in the logs means the process was
+  stuck and got restarted — look for what preceded it (Postgres/Horizon trouble), not at the restart.
 - **Never** manually `set-cursor` forward past unprocessed payments to "fix" a stuck reconciler — that
   permanently skips real transactions. `set-cursor` is for deliberate replay/recovery, documented as
   such in the code, not a routine unstick command.
@@ -119,6 +126,37 @@ recorded as `status = 'held'`, `flag_reason = 'duplicate_session'`, with a `seco
 already-paid session` warning in the reconciler log, and the cursor moves on. It is never dropped:
 review it in the admin payments list and set its status by hand (refund, or mark paid if the top-up
 was intended). It doesn't count toward paid volume or owed fees until an admin changes its status.
+
+## Adding an index to a large, live table
+
+A plain `CREATE INDEX` takes a `SHARE` lock that blocks every INSERT/UPDATE/DELETE on the table for the
+whole build — on `payments` that means stalled checkouts. Use `CREATE INDEX CONCURRENTLY` through the
+runner's non-transactional path:
+
+1. Put the marker `-- no-transaction` as the **first line** of the `.up.sql`, and keep the file to that
+   one statement: `CREATE INDEX CONCURRENTLY IF NOT EXISTS ...`.
+2. Write the `.down.sql` the same way: `-- no-transaction` then `DROP INDEX CONCURRENTLY IF EXISTS ...`.
+3. If the build fails partway, Postgres leaves an `INVALID` index behind and the migration stays
+   pending. Check with `SELECT indexrelid::regclass FROM pg_index WHERE NOT indisvalid;`, drop it with
+   `DROP INDEX CONCURRENTLY`, then re-run `npm run migrate:up`.
+
+## Verifying migrations against real data (manual, before a risky migration ships)
+
+CI only ever runs `migrate:up` against a fresh, empty database, so backfills and data guards (e.g.
+`021_account_recovery`'s duplicate-email check, `022_fee_settlement`'s `fee_status` backfill) and lock
+behaviour on large tables are never exercised there. Before shipping a migration that touches existing
+rows or indexes a hot table:
+
+```bash
+createdb konfirm_migration_check
+db/scripts/restore.sh <recent_backup_dump> konfirm_migration_check   # production-shaped data
+DATABASE_URL=postgres:///konfirm_migration_check npm run migrate:up
+DATABASE_URL=postgres:///konfirm_migration_check npm run migrate:down
+DATABASE_URL=postgres:///konfirm_migration_check npm run migrate:up
+dropdb konfirm_migration_check
+```
+
+Note the date and migration range you verified in the PR description.
 
 ## Accepted dependency advisories (reconciler)
 

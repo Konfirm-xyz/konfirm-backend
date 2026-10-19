@@ -8,7 +8,8 @@ mod verdict;
 use anyhow::{bail, Context, Result};
 use horizon::HorizonClient;
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use store::{Merchant, Store};
 use uuid::Uuid;
 
@@ -53,6 +54,38 @@ pub fn eurc_issuer() -> String {
 // everywhere else in this codebase (the keeper/sweeper services on the
 // Node side) rather than inventing a push/signal-based reload mechanism.
 const MERCHANT_REFRESH_SECS: u64 = 60;
+
+// The liveness watchdog for watch-all: every loop iteration (the merchant
+// refresh loop and each merchant's poll loop) stamps LAST_TICK. If nothing
+// has stamped it for this long, the process is wedged rather than slow —
+// exit so Railway's restartPolicyType: ALWAYS has something to react to.
+// Well above MERCHANT_REFRESH_SECS so a normal refresh cycle never trips it.
+const LIVENESS_STALE_SECS: u64 = 600;
+const LIVENESS_CHECK_SECS: u64 = 30;
+
+static LAST_TICK: AtomicU64 = AtomicU64::new(0);
+
+fn now_secs() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+fn record_tick() {
+    LAST_TICK.store(now_secs(), Ordering::Relaxed);
+}
+
+// Runs on its own OS thread, not a tokio task, so it still fires even if
+// the async runtime itself is the thing that's stuck.
+fn spawn_liveness_watchdog() {
+    record_tick();
+    std::thread::spawn(|| loop {
+        std::thread::sleep(Duration::from_secs(LIVENESS_CHECK_SECS));
+        let idle = now_secs().saturating_sub(LAST_TICK.load(Ordering::Relaxed));
+        if idle > LIVENESS_STALE_SECS {
+            tracing::error!(idle_secs = idle, "no reconciler loop has ticked in {LIVENESS_STALE_SECS}s — exiting so the platform restarts the process");
+            std::process::exit(1);
+        }
+    });
+}
 
 fn platform_fee_address() -> Option<String> {
     std::env::var("PLATFORM_FEE_ADDRESS").ok()
@@ -201,6 +234,7 @@ async fn watch(merchant_address: &str, max_polls: u32, interval_secs: u64) -> Re
 // other merchant's polling down with it — see watch_merchant_supervised.
 async fn watch_all(interval_secs: u64) -> Result<()> {
     let store = Store::connect(&database_url()).await?;
+    spawn_liveness_watchdog();
 
     // One-time legacy-cursor migration, and only for the specific merchant
     // that was actually being watched under the old single-process model —
@@ -225,6 +259,7 @@ async fn watch_all(interval_secs: u64) -> Result<()> {
     let mut tasks: HashMap<Uuid, tokio::task::JoinHandle<()>> = HashMap::new();
 
     loop {
+        record_tick();
         let active = store.find_active_merchants().await?;
         let active_ids: HashSet<Uuid> = active.iter().map(|(id, _)| *id).collect();
 
@@ -316,6 +351,7 @@ async fn watch_merchant_supervised(store: Store, merchant_id: Uuid, merchant_add
     let mut pending_checks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
     loop {
+        record_tick();
         match poll_once(&horizon, &store, &merchant, &merchant_address, &mut cursor, &cursor_key, &mut pending_checks).await {
             Ok(_found) => {
                 // watch-all runs indefinitely, unlike watch()'s bounded

@@ -302,10 +302,18 @@ repeatedly) and `down` can genuinely undo something, not just re-run `CREATE TAB
 hope. The migration's SQL and its tracking-table record land in the same transaction, so a failure
 can't leave the two out of sync.
 
-Verified for real: applied all 5 from empty, reverted one at a time down to nothing (confirming each
-table — and the `claim_link_seq` function — actually disappeared), then reapplied cleanly. This isn't
-theoretical; every step above was run against a live scratch database, not inferred from reading the
-script.
+What's actually verified, and what isn't: the original round-trip check (apply from empty, revert one
+at a time to nothing, reapply) was done by hand when only migrations `001`–`005` existed. Since then,
+CI runs the full `migrate:up` chain on every push — but always against a **fresh, empty** Postgres, so
+any migration that backfills or guards existing rows (`021_account_recovery`'s duplicate-email check,
+`022_fee_settlement`'s `fee_status` backfill) has never run in CI against real rows, and index lock
+time is invisible on an empty table. Before shipping a migration that touches existing data, run the
+manual seeded check in [docs/RUNBOOK.md](docs/RUNBOOK.md#verifying-migrations-against-real-data-manual-before-a-risky-migration-ships).
+
+**Indexes on live tables:** every migration runs inside `BEGIN`/`COMMIT` by default, which Postgres
+won't allow for `CREATE INDEX CONCURRENTLY`. A migration whose first line is `-- no-transaction` runs
+outside a transaction instead — use that (one statement per file) for any index added to a large,
+actively-written table such as `payments`. See [docs/RUNBOOK.md](docs/RUNBOOK.md#adding-an-index-to-a-large-live-table).
 
 **In production, `migrate:up` runs automatically** via `railway.json`'s `deploy.preDeployCommand` — a
 real gap until this was added: two migrations (`014_referrals`, `015_referral_promos`) had landed in
