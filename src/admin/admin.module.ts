@@ -8,6 +8,7 @@ import { AdminMerchantsService } from './admin-merchants.service';
 import { AdminActionsService } from './admin-actions.service';
 import { AdminStatsService } from './admin-stats.service';
 import { AdminPaymentsService } from './admin-payments.service';
+import { AdminPaymentNotesService } from './admin-payment-notes.service';
 import { AdminComplianceService } from './admin-compliance.service';
 import { AdminReconcilerService } from './admin-reconciler.service';
 import { AdminWithdrawalAttemptsService } from './admin-withdrawal-attempts.service';
@@ -31,6 +32,7 @@ import { AdminBazaarService } from './admin-bazaar.service';
     AdminActionsService,
     AdminStatsService,
     AdminPaymentsService,
+    AdminPaymentNotesService,
     AdminComplianceService,
     AdminReconcilerService,
     AdminWithdrawalAttemptsService,
