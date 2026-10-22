@@ -1,40 +1,36 @@
 # Runbook
 
-Four incidents, in order of how likely they are to actually happen to this project, not a generic
-list. The first three are things that already happened during development — this is written from
-having lived through them, not guessed at.
+Operational notes for on-call and maintainers.
 
-## 1. Horizon or Soroban RPC unreachable
+## Referral rewards and disputed/refunded qualifying payments
 
-**What it looks like:** checkout, cash-out, or the "get test USDC" flow fails with a generic
-"Something didn't go through on our end" on the client, and the server log shows an `unhandled
-exception` with `"type": "NetworkError"` or `"fetch failed"`, `context: "AllExceptionsFilter"`.
+### Decision (issue #57): claw-back is NOT implemented; accepted risk
 
-**This already happened**, live, mid-session — Horizon had a transient outage that broke both
-`payments.service.ts`'s `loadAccount` call and the compliance check's Soroban RPC call at the same
-time. Confirmed via `curl -o /dev/null -w "%{http_code}" https://horizon-testnet.stellar.org` returning
-nothing, then recovering a few minutes later on its own.
+The referral sweep (`src/referrals/referral-rewards.service.ts`) evaluates the
+qualifying-payment check once via a one-shot `EXISTS` query and then stamps
+`reward_granted_at`, which is treated as permanent. If that qualifying payment
+is later set to `disputed` or `refunded` (see `db/migrations/003_payments.up.sql`
+status values and the admin action in `src/admin/admin-payments.service.ts`),
+the referrer keeps the reward and there is no automatic reversal path.
 
-**Diagnose:**
-```bash
-curl -s -o /dev/null -w "%{http_code}\n" https://horizon-testnet.stellar.org
-curl -s -o /dev/null -w "%{http_code}\n" https://soroban-testnet.stellar.org
-```
-A non-200 (or a hang) on either confirms it's upstream, not the app.
+We have decided to **accept this risk** rather than implement claw-back, because:
 
-**Respond:** Nothing to do but wait — every call to Horizon already has a timeout (8–10s) and retry
-with backoff (see README § Timeouts & retries), and the compliance check fails open rather than
-blocking checkout entirely. If it's been down more than ~15 minutes, check
-[Stellar's status page] for a known incident before assuming it's local.
+- Dispute/refund volume on payments originated through referral signups is low.
+- The reward value per referral is small relative to the cost of building and
+  operating a reversal path (re-validation windows, idempotent revocation,
+  partial-reversal accounting).
+- A one-shot grant keeps the sweep simple and idempotent; adding re-validation
+  would introduce double-revoke and race hazards for marginal financial benefit.
 
-**Follow-up:** none needed if this was transient. If it recurs often, that's a signal to add an
-alternate Horizon endpoint as a fallback, not just retry the same one harder.
+### What to do if this becomes material
 
-## 2. Postgres connection exhaustion / database unreachable
+If dispute/refund volume on referral-originated payments grows, revisit this
+decision. A claw-back would need to:
 
-**What it looks like:** everything fails at once — signup, login, activity, checkout — since every
-one of those touches Postgres directly (`src/db/pool.ts`). Errors will mention `ECONNREFUSED`,
-`too many clients already`, or a hung query.
+1. Re-validate eligibility after a cooldown window instead of treating
+   `reward_granted_at` as immediately final, and
+2. Revoke idempotently (guard on a revocation marker) so a reward is never
+   double-revoked and the existing grant path is unaffected.
 
 **Current real settings, not assumed:** `pool.ts` sets no explicit size, so `pg`'s `Pool` defaults to
 **max 10 connections** per process. With Postgres's own default `max_connections = 100`, this app

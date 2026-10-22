@@ -211,12 +211,19 @@ impl HorizonClient {
 
         let best_bid = resp.bids.first().map(|l| Decimal::from_str(&l.price)).transpose()?;
         let best_ask = resp.asks.first().map(|l| Decimal::from_str(&l.price)).transpose()?;
-        match (best_bid, best_ask) {
-            (Some(bid), Some(ask)) => Ok((bid + ask) / Decimal::from(2)),
-            (Some(bid), None) => Ok(bid),
-            (None, Some(ask)) => Ok(ask),
-            (None, None) => anyhow::bail!("{label}/USDC order book is empty on both sides — no rate available"),
-        }
+        rate_from_best_levels(best_bid, best_ask, label)
+    }
+}
+
+/// The rate from an order book's best bid and ask: their midpoint when both
+/// sides exist, otherwise whichever side does. Pure so it's testable without
+/// a live order book.
+fn rate_from_best_levels(best_bid: Option<Decimal>, best_ask: Option<Decimal>, label: &str) -> Result<Decimal> {
+    match (best_bid, best_ask) {
+        (Some(bid), Some(ask)) => Ok((bid + ask) / Decimal::from(2)),
+        (Some(bid), None) => Ok(bid),
+        (None, Some(ask)) => Ok(ask),
+        (None, None) => anyhow::bail!("{label}/USDC order book is empty on both sides — no rate available"),
     }
 }
 
@@ -234,6 +241,32 @@ struct OrderBookResponse {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    fn d(s: &str) -> Decimal {
+        Decimal::from_str(s).unwrap()
+    }
+
+    #[test]
+    fn rate_is_the_exact_midpoint_when_both_sides_exist() {
+        assert_eq!(rate_from_best_levels(Some(d("0.27")), Some(d("0.29")), "XLM").unwrap(), d("0.28"));
+        assert_eq!(rate_from_best_levels(Some(d("1")), Some(d("3")), "EURC").unwrap(), d("2"));
+    }
+
+    #[test]
+    fn rate_falls_back_to_the_bid_when_there_is_no_ask() {
+        assert_eq!(rate_from_best_levels(Some(d("0.273")), None, "XLM").unwrap(), d("0.273"));
+    }
+
+    #[test]
+    fn rate_falls_back_to_the_ask_when_there_is_no_bid() {
+        assert_eq!(rate_from_best_levels(None, Some(d("1.08")), "EURC").unwrap(), d("1.08"));
+    }
+
+    #[test]
+    fn empty_order_book_has_no_rate() {
+        let err = rate_from_best_levels(None, None, "XLM").unwrap_err();
+        assert!(err.to_string().contains("XLM/USDC order book is empty"));
+    }
 
     const USDC_TESTNET_ISSUER: &str = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
     const EURC_TESTNET_ISSUER: &str = "GB3Q6QDZYTHWT7E5PVS3W7FUT5GVAFC5KSZFFLPU25GO7VTC3NM2ZTVO";
