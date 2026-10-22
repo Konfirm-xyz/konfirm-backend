@@ -11,6 +11,20 @@ import { Pool } from 'pg';
 const MIGRATIONS_DIR = join(__dirname, 'migrations');
 const pool = new Pool({ connectionString: process.env.DATABASE_URL ?? 'postgres:///konfirm_dev' });
 
+// Postgres refuses CREATE INDEX CONCURRENTLY inside a transaction block, and
+// CONCURRENTLY is the only way to index a hot table (payments, etc.) without
+// a SHARE lock blocking every write for the whole build. A migration whose
+// first line is exactly this marker runs outside BEGIN/COMMIT. Keep such a
+// file to a single statement: there's no rollback, so a multi-statement
+// file that fails halfway stays half-applied. A failed CONCURRENTLY build
+// leaves an INVALID index behind — write the .up.sql with IF NOT EXISTS and
+// the .down.sql with DROP INDEX CONCURRENTLY IF EXISTS so a retry is clean.
+export const NO_TRANSACTION_MARKER = '-- no-transaction';
+
+export function isNonTransactional(sql: string): boolean {
+  return sql.split(/\r?\n/, 1)[0].trim() === NO_TRANSACTION_MARKER;
+}
+
 async function ensureTrackingTable(): Promise<void> {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -30,8 +44,8 @@ function pendingUpFiles(applied: Set<string>): string[] {
 // The migration's own SQL and its tracking-table record land in the same
 // transaction — a failure applying one can't leave the other out of sync
 // with what actually happened in the database.
-async function runInTransaction(sql: string, trackingQuery: string, trackingParams: string[]): Promise<void> {
-  const client = await pool.connect();
+async function runInTransaction(db: Pool, sql: string, trackingQuery: string, trackingParams: string[]): Promise<void> {
+  const client = await db.connect();
   try {
     await client.query('BEGIN');
     await client.query(sql);
@@ -42,6 +56,22 @@ async function runInTransaction(sql: string, trackingQuery: string, trackingPara
     throw err;
   } finally {
     client.release();
+  }
+}
+
+// The non-transactional path: the tracking row is written only after the
+// SQL succeeds, so a failure leaves the migration pending (and retryable)
+// rather than recorded as applied.
+async function runWithoutTransaction(db: Pool, sql: string, trackingQuery: string, trackingParams: string[]): Promise<void> {
+  await db.query(sql);
+  await db.query(trackingQuery, trackingParams);
+}
+
+export async function applyMigrationSql(db: Pool, sql: string, trackingQuery: string, trackingParams: string[]): Promise<void> {
+  if (isNonTransactional(sql)) {
+    await runWithoutTransaction(db, sql, trackingQuery, trackingParams);
+  } else {
+    await runInTransaction(db, sql, trackingQuery, trackingParams);
   }
 }
 
@@ -60,7 +90,7 @@ async function up(): Promise<void> {
     const name = file.replace(/\.up\.sql$/, '');
     console.log(`applying ${name}...`);
     const sql = readFileSync(join(MIGRATIONS_DIR, file), 'utf8');
-    await runInTransaction(sql, 'INSERT INTO schema_migrations (name) VALUES ($1)', [name]);
+    await applyMigrationSql(pool, sql, 'INSERT INTO schema_migrations (name) VALUES ($1)', [name]);
   }
   console.log(`applied ${pending.length} migration(s).`);
 }
@@ -81,7 +111,7 @@ async function down(steps: number): Promise<void> {
     }
     console.log(`reverting ${name}...`);
     const sql = readFileSync(downFile, 'utf8');
-    await runInTransaction(sql, 'DELETE FROM schema_migrations WHERE name = $1', [name]);
+    await applyMigrationSql(pool, sql, 'DELETE FROM schema_migrations WHERE name = $1', [name]);
   }
   console.log(`reverted ${rows.length} migration(s).`);
 }
@@ -99,9 +129,13 @@ async function main(): Promise<void> {
   }
 }
 
-main()
-  .catch((err) => {
-    console.error(err);
-    process.exitCode = 1;
-  })
-  .finally(() => pool.end());
+// Only run as a CLI — importing this module (the regression test does) must
+// not kick off a real migration run against whatever DATABASE_URL is set.
+if (require.main === module) {
+  main()
+    .catch((err) => {
+      console.error(err);
+      process.exitCode = 1;
+    })
+    .finally(() => pool.end());
+}

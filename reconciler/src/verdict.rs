@@ -144,6 +144,21 @@ mod tests {
     }
 
     #[test]
+    fn exact_eurc_payment_is_paid() {
+        let l = link(Some("25"), "EURC", true);
+        assert_eq!(assess(Some(&l), d("25"), "EURC", eurc().as_deref()), Verdict::paid());
+    }
+
+    #[test]
+    fn eurc_payment_with_the_usdc_issuer_is_held() {
+        let l = link(Some("25"), "EURC", true);
+        assert_eq!(
+            assess(Some(&l), d("25"), "EURC", usdc().as_deref()),
+            Verdict::held("issuer_mismatch")
+        );
+    }
+
+    #[test]
     fn native_xlm_payment_must_have_no_issuer() {
         let l = link(Some("10"), "XLM", true);
         assert_eq!(assess(Some(&l), d("10"), "XLM", None), Verdict::paid());

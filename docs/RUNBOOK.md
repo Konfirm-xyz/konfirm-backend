@@ -1,40 +1,36 @@
 # Runbook
 
-Four incidents, in order of how likely they are to actually happen to this project, not a generic
-list. The first three are things that already happened during development — this is written from
-having lived through them, not guessed at.
+Operational notes for on-call and maintainers.
 
-## 1. Horizon or Soroban RPC unreachable
+## Referral rewards and disputed/refunded qualifying payments
 
-**What it looks like:** checkout, cash-out, or the "get test USDC" flow fails with a generic
-"Something didn't go through on our end" on the client, and the server log shows an `unhandled
-exception` with `"type": "NetworkError"` or `"fetch failed"`, `context: "AllExceptionsFilter"`.
+### Decision (issue #57): claw-back is NOT implemented; accepted risk
 
-**This already happened**, live, mid-session — Horizon had a transient outage that broke both
-`payments.service.ts`'s `loadAccount` call and the compliance check's Soroban RPC call at the same
-time. Confirmed via `curl -o /dev/null -w "%{http_code}" https://horizon-testnet.stellar.org` returning
-nothing, then recovering a few minutes later on its own.
+The referral sweep (`src/referrals/referral-rewards.service.ts`) evaluates the
+qualifying-payment check once via a one-shot `EXISTS` query and then stamps
+`reward_granted_at`, which is treated as permanent. If that qualifying payment
+is later set to `disputed` or `refunded` (see `db/migrations/003_payments.up.sql`
+status values and the admin action in `src/admin/admin-payments.service.ts`),
+the referrer keeps the reward and there is no automatic reversal path.
 
-**Diagnose:**
-```bash
-curl -s -o /dev/null -w "%{http_code}\n" https://horizon-testnet.stellar.org
-curl -s -o /dev/null -w "%{http_code}\n" https://soroban-testnet.stellar.org
-```
-A non-200 (or a hang) on either confirms it's upstream, not the app.
+We have decided to **accept this risk** rather than implement claw-back, because:
 
-**Respond:** Nothing to do but wait — every call to Horizon already has a timeout (8–10s) and retry
-with backoff (see README § Timeouts & retries), and the compliance check fails open rather than
-blocking checkout entirely. If it's been down more than ~15 minutes, check
-[Stellar's status page] for a known incident before assuming it's local.
+- Dispute/refund volume on payments originated through referral signups is low.
+- The reward value per referral is small relative to the cost of building and
+  operating a reversal path (re-validation windows, idempotent revocation,
+  partial-reversal accounting).
+- A one-shot grant keeps the sweep simple and idempotent; adding re-validation
+  would introduce double-revoke and race hazards for marginal financial benefit.
 
-**Follow-up:** none needed if this was transient. If it recurs often, that's a signal to add an
-alternate Horizon endpoint as a fallback, not just retry the same one harder.
+### What to do if this becomes material
 
-## 2. Postgres connection exhaustion / database unreachable
+If dispute/refund volume on referral-originated payments grows, revisit this
+decision. A claw-back would need to:
 
-**What it looks like:** everything fails at once — signup, login, activity, checkout — since every
-one of those touches Postgres directly (`src/db/pool.ts`). Errors will mention `ECONNREFUSED`,
-`too many clients already`, or a hung query.
+1. Re-validate eligibility after a cooldown window instead of treating
+   `reward_granted_at` as immediately final, and
+2. Revoke idempotently (guard on a revocation marker) so a reward is never
+   double-revoked and the existing grant path is unaffected.
 
 **Current real settings, not assumed:** `pool.ts` sets no explicit size, so `pg`'s `Pool` defaults to
 **max 10 connections** per process. With Postgres's own default `max_connections = 100`, this app
@@ -109,6 +105,13 @@ the poll interval (default 3s) times a large margin, the reconciler isn't runnin
   locally, wrap it in `while true; do cargo run -- watch ...; done` as the same safety net.
 - If it's running but the cursor is stale: check its stdout for repeated `Horizon request failed,
   retrying after backoff` — that's incident #1 again, propagating downstream.
+- **Hung, not crashed:** the reconciler can't wedge silently anymore. Every Postgres call is bounded
+  (`acquire_timeout` 10s, `statement_timeout` 30s on every connection — `reconciler/src/store.rs`), so
+  a stalled query surfaces as a `poll failed — backing off` warning instead of blocking forever. And
+  `watch-all` runs a liveness watchdog on its own OS thread: if neither the merchant-refresh loop nor
+  any merchant's poll loop has ticked in 600s, it logs `no reconciler loop has ticked` and exits 1, so
+  Railway's `restartPolicyType: ALWAYS` restarts it. Seeing that line in the logs means the process was
+  stuck and got restarted — look for what preceded it (Postgres/Horizon trouble), not at the restart.
 - **Never** manually `set-cursor` forward past unprocessed payments to "fix" a stuck reconciler — that
   permanently skips real transactions. `set-cursor` is for deliberate replay/recovery, documented as
   such in the code, not a routine unstick command.
@@ -119,6 +122,37 @@ recorded as `status = 'held'`, `flag_reason = 'duplicate_session'`, with a `seco
 already-paid session` warning in the reconciler log, and the cursor moves on. It is never dropped:
 review it in the admin payments list and set its status by hand (refund, or mark paid if the top-up
 was intended). It doesn't count toward paid volume or owed fees until an admin changes its status.
+
+## Adding an index to a large, live table
+
+A plain `CREATE INDEX` takes a `SHARE` lock that blocks every INSERT/UPDATE/DELETE on the table for the
+whole build — on `payments` that means stalled checkouts. Use `CREATE INDEX CONCURRENTLY` through the
+runner's non-transactional path:
+
+1. Put the marker `-- no-transaction` as the **first line** of the `.up.sql`, and keep the file to that
+   one statement: `CREATE INDEX CONCURRENTLY IF NOT EXISTS ...`.
+2. Write the `.down.sql` the same way: `-- no-transaction` then `DROP INDEX CONCURRENTLY IF EXISTS ...`.
+3. If the build fails partway, Postgres leaves an `INVALID` index behind and the migration stays
+   pending. Check with `SELECT indexrelid::regclass FROM pg_index WHERE NOT indisvalid;`, drop it with
+   `DROP INDEX CONCURRENTLY`, then re-run `npm run migrate:up`.
+
+## Verifying migrations against real data (manual, before a risky migration ships)
+
+CI only ever runs `migrate:up` against a fresh, empty database, so backfills and data guards (e.g.
+`021_account_recovery`'s duplicate-email check, `022_fee_settlement`'s `fee_status` backfill) and lock
+behaviour on large tables are never exercised there. Before shipping a migration that touches existing
+rows or indexes a hot table:
+
+```bash
+createdb konfirm_migration_check
+db/scripts/restore.sh <recent_backup_dump> konfirm_migration_check   # production-shaped data
+DATABASE_URL=postgres:///konfirm_migration_check npm run migrate:up
+DATABASE_URL=postgres:///konfirm_migration_check npm run migrate:down
+DATABASE_URL=postgres:///konfirm_migration_check npm run migrate:up
+dropdb konfirm_migration_check
+```
+
+Note the date and migration range you verified in the PR description.
 
 ## Accepted dependency advisories (reconciler)
 

@@ -34,7 +34,7 @@ flowchart LR
 
 ## 3. Components
 
-### 3.1 Money core (new)
+### 3.1 Money core
 
 A small library, `money-rules`, with no I/O:
 

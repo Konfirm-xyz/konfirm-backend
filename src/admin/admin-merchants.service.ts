@@ -5,7 +5,7 @@ import { pool } from '../db/pool';
 export class AdminMerchantsService {
   async list(limit = 50, offset = 0) {
     const { rows } = await pool.query(
-      `SELECT id, email, name, status, risk_tier, stellar_base_address, created_at
+      `SELECT id, email, name, status, risk_tier, fee_bps, stellar_base_address, created_at
        FROM merchants
        ORDER BY created_at DESC
        LIMIT $1 OFFSET $2`,

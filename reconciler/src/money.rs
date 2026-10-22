@@ -64,9 +64,15 @@ mod tests {
         }
     }
 
+    // One test for both cases: they share a process-wide env var, so
+    // separate tests would race under cargo's parallel runner.
     #[test]
-    fn floor_is_zero_when_unconfigured() {
+    fn floor_is_zero_when_unconfigured_and_parsed_when_set() {
         std::env::remove_var("PLATFORM_FEE_FLOOR");
         assert_eq!(configured_floor(), Decimal::ZERO);
+
+        std::env::set_var("PLATFORM_FEE_FLOOR", "0.05");
+        assert_eq!(configured_floor(), Decimal::from_str("0.05").unwrap());
+        std::env::remove_var("PLATFORM_FEE_FLOOR");
     }
 }
