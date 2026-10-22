@@ -64,6 +64,23 @@ const setBazaarListingStatusSchema = z.object({
   reason: z.string().max(500).optional(),
 });
 
+// Admin-assisted profile override (issue #38). All fields optional so the
+// caller only sends what needs changing.
+const updateMerchantProfileSchema = z
+  .object({
+    name: z.string().min(1).max(200).optional(),
+    email: z.string().trim().toLowerCase().email().optional(),
+    stellar_base_address: z
+      .string()
+      .regex(/^G[A-Z2-7]{55}$/, 'must be a valid Stellar G... address')
+      .optional(),
+    reason: z.string().max(500).optional(),
+  })
+  .refine(
+    (b) => b.name !== undefined || b.email !== undefined || b.stellar_base_address !== undefined,
+    { message: 'at least one of name, email, or stellar_base_address must be provided' },
+  );
+
 // One controller for the whole admin resource surface rather than one per
 // domain. This has grown past the "5 resources" this comment used to say —
 // it's 18 services and ~30 routes now — but the reason still holds: every
@@ -194,6 +211,54 @@ export class AdminController {
       reason: body.reason,
     });
     return merchant;
+  }
+
+  // Admin-assisted profile override (issue #38).
+  // Bypasses the two-step email-verification flow that self-service uses — an
+  // admin applying a correction on behalf of a merchant doesn't need the
+  // merchant to confirm it at their new inbox. Does NOT bump session_version
+  // so the merchant is not unexpectedly signed out by a support action.
+  @Patch('merchants/:id/profile')
+  @ApiOperation({
+    summary: 'Update merchant profile fields',
+    description:
+      'Admin override for name, email, and/or stellar_base_address. ' +
+      'All three fields are optional — send only what needs changing. ' +
+      'Email changes are applied directly without the merchant\'s two-step verification. ' +
+      'Existing merchant sessions are not revoked. Logged to admin_actions.',
+  })
+  @ApiParam({ name: 'id', description: 'Merchant UUID', type: 'string' })
+  @ApiBody(zodBody(updateMerchantProfileSchema, 'Update merchant profile'))
+  @ApiResponse({ status: 200, description: 'Updated merchant record.' })
+  @ApiResponse({ status: 400, description: 'No fields provided or conflicting data.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
+  @ApiResponse({ status: 404, description: 'Merchant not found.' })
+  @ApiResponse({ status: 409, description: 'New email already taken by another merchant.' })
+  async updateMerchantProfile(
+    @Param('id') id: string,
+    @Body(new ZodValidationPipe(updateMerchantProfileSchema)) body: z.infer<typeof updateMerchantProfileSchema>,
+    @Req() req: AuthedAdminRequest,
+  ) {
+    const { reason, ...fields } = body;
+    const merchant = await this.merchants.updateProfile(id, fields);
+    await this.actions.log(req.admin.id, 'merchant.update-profile', 'merchant', id, {
+      updated: Object.keys(fields),
+      reason,
+    });
+    return merchant;
+  }
+
+  // --- Payments ---
+
+  @Get('payments')
+  @ApiOperation({ summary: 'List all payments', description: 'All payments across every merchant, newest first. Filter by status, paginate with limit/offset.' })
+  @ApiQuery({ name: 'status', required: false, type: 'string', description: 'Filter by status: paid | held | disputed' })
+  @ApiQuery({ name: 'limit', required: false, type: 'number', description: 'Max results' })
+  @ApiQuery({ name: 'offset', required: false, type: 'number', description: 'Pagination offset' })
+  @ApiResponse({ status: 200, description: 'Array of payment records.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
+  listPayments(@Query('status') status?: string, @Query('limit') limit?: string, @Query('offset') offset?: string) {
+    return this.payments.list(status, limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
   }
 
   @Patch('payments/:id/status')
