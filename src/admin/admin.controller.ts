@@ -7,6 +7,7 @@ import { AdminMerchantsService } from './admin-merchants.service';
 import { AdminActionsService } from './admin-actions.service';
 import { AdminStatsService } from './admin-stats.service';
 import { AdminPaymentsService } from './admin-payments.service';
+import { AdminPaymentNotesService } from './admin-payment-notes.service';
 import { AdminComplianceService } from './admin-compliance.service';
 import { AdminReconcilerService } from './admin-reconciler.service';
 import { AdminWithdrawalAttemptsService } from './admin-withdrawal-attempts.service';
@@ -64,22 +65,11 @@ const setBazaarListingStatusSchema = z.object({
   reason: z.string().max(500).optional(),
 });
 
-// Admin-assisted profile override (issue #38). All fields optional so the
-// caller only sends what needs changing.
-const updateMerchantProfileSchema = z
-  .object({
-    name: z.string().min(1).max(200).optional(),
-    email: z.string().trim().toLowerCase().email().optional(),
-    stellar_base_address: z
-      .string()
-      .regex(/^G[A-Z2-7]{55}$/, 'must be a valid Stellar G... address')
-      .optional(),
-    reason: z.string().max(500).optional(),
-  })
-  .refine(
-    (b) => b.name !== undefined || b.email !== undefined || b.stellar_base_address !== undefined,
-    { message: 'at least one of name, email, or stellar_base_address must be provided' },
-  );
+const addPaymentNoteSchema = z.object({
+  // 5 000 characters is generous for an investigation note; enforced at the
+  // API boundary so the DB never has to truncate mid-sentence.
+  body: z.string().min(1).max(5000),
+});
 
 // One controller for the whole admin resource surface rather than one per
 // domain. This has grown past the "5 resources" this comment used to say —
@@ -98,6 +88,7 @@ export class AdminController {
     private readonly actions: AdminActionsService,
     private readonly stats: AdminStatsService,
     private readonly payments: AdminPaymentsService,
+    private readonly paymentNotes: AdminPaymentNotesService,
     private readonly compliance: AdminComplianceService,
     private readonly reconciler: AdminReconcilerService,
     private readonly withdrawalAttempts: AdminWithdrawalAttemptsService,
@@ -284,7 +275,63 @@ export class AdminController {
     return payment;
   }
 
-  @Post('blocked-addresses')
+  // Notes are independent of status changes — an admin reviewing a held
+  // payment can leave context ("confirmed with merchant via email, releasing")
+  // without necessarily changing the status yet. The body is also logged to
+  // admin_actions so the note appears in the global activity feed in addition
+  // to being attached to the payment itself.
+  @Post('payments/:id/notes')
+  @ApiOperation({
+    summary: 'Add an investigation note to a payment',
+    description:
+      'Appends a free-text note to the payment\'s investigation thread. ' +
+      'Independent of status changes — no status change is required or implied. ' +
+      'Logged to admin_actions as payment.note-added.',
+  })
+  @ApiParam({ name: 'id', description: 'Payment UUID', type: 'string' })
+  @ApiBody(zodBody(addPaymentNoteSchema, 'Add payment note'))
+  @ApiResponse({ status: 201, description: 'Created note record.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
+  @ApiResponse({ status: 404, description: 'Payment not found.' })
+  async addPaymentNote(
+    @Param('id') id: string,
+    @Body(new ZodValidationPipe(addPaymentNoteSchema)) body: z.infer<typeof addPaymentNoteSchema>,
+    @Req() req: AuthedAdminRequest,
+  ) {
+    const note = await this.paymentNotes.create(id, req.admin.id, body.body);
+    await this.actions.log(req.admin.id, 'payment.note-added', 'payment', id, {
+      note_id: note.id,
+      // First 120 chars in the audit log so the activity feed gives enough
+      // context without storing the entire note body twice.
+      body_preview: body.body.length > 120 ? body.body.slice(0, 120) + '…' : body.body,
+    });
+    return note;
+  }
+
+  @Get('payments/:id/notes')
+  @ApiOperation({
+    summary: 'List investigation notes for a payment',
+    description: 'Returns the full notes thread for a payment, oldest first.',
+  })
+  @ApiParam({ name: 'id', description: 'Payment UUID', type: 'string' })
+  @ApiResponse({ status: 200, description: 'Array of note records, oldest first.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
+  @ApiResponse({ status: 404, description: 'Payment not found.' })
+  listPaymentNotes(@Param('id') id: string) {
+    return this.paymentNotes.list(id);
+  }
+
+  // --- Compliance ---
+
+  @Get('compliance/blocked-addresses')
+  @ApiOperation({ summary: 'List blocked Stellar addresses', description: 'The admin-managed compliance blocklist.' })
+  @ApiResponse({ status: 200, description: 'Array of blocked address records.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
+  listBlockedAddresses() {
+    return this.compliance.list();
+  }
+
+  @Post('compliance/blocked-addresses')
   @ApiOperation({
     summary: 'Block a Stellar address',
     description: 'Adds a Stellar address to the blocklist. Logged to admin_actions.',
