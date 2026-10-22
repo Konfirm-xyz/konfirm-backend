@@ -68,3 +68,11 @@ export function captureException(exception: unknown): void {
   // primary defense is not attaching sensitive data in the first place.
   Sentry.captureException(exception);
 }
+
+// Gives a queued event a chance to send before a deliberate exit. Resolves
+// immediately when Sentry isn't configured.
+export async function flushSentry(timeoutMs: number): Promise<void> {
+  if (process.env.SENTRY_DSN) {
+    await Sentry.flush(timeoutMs);
+  }
+}

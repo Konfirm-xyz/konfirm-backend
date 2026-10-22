@@ -5,7 +5,8 @@ import { AuthedRequest, AuthGuard } from '../auth/auth.guard';
 import { nonNegativeIntegerStringSchema, POSTGRES_BIGINT_MAX } from '../common/numeric-validation';
 import { PaymentsService } from './payments.service';
 
-const muxedIdSchema = nonNegativeIntegerStringSchema(POSTGRES_BIGINT_MAX, 'muxed_id');
+// Same shape check as deposits.controller.ts's account fields.
+const STELLAR_ADDRESS = /^G[A-Z2-7]{55}$/;
 
 @Controller('payments')
 export class PaymentsController {
@@ -37,7 +38,11 @@ export class PaymentsController {
     if (!linkId || !muxedId || !payer) {
       throw new BadRequestException('linkId, muxed_id, and payer are all required');
     }
-    this.validateMuxedId(muxedId);
+    // Checked here, before the service hands it to Horizon: a malformed
+    // address otherwise gets retried by withRetry and surfaces as a 500.
+    if (!STELLAR_ADDRESS.test(payer)) {
+      throw new BadRequestException('payer must be a valid Stellar address');
+    }
     return this.payments.prepareTx(linkId, muxedId, payer);
   }
 

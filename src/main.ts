@@ -8,6 +8,7 @@ import { Logger } from 'nestjs-pino';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
 import { initSentry } from './observability/sentry';
+import { installProcessHandlers } from './observability/process-handlers';
 import { resolveTrustProxyHops } from './common/trust-proxy';
 import { assertSeparateHotKeys } from './common/facilitator-signer';
 import { assertNetworkReady } from './common/stellar-network';
@@ -18,6 +19,9 @@ async function bootstrap() {
   assertSeparateHotKeys();
   assertNetworkReady();
   initSentry();
+  // After initSentry so Sentry's own handlers capture first; these add the
+  // log line and the deliberate exit whether or not SENTRY_DSN is set.
+  installProcessHandlers();
   // bufferLogs holds anything logged before the pino logger takes over
   // (below) and replays it through pino instead of dropping it or falling
   // back to Nest's plain console logger for just those first few lines.

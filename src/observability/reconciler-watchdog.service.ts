@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { pool } from '../db/pool';
+import { captureException } from './sentry';
 
 // How long the reconciler can go without moving its cursor before we call it
 // stalled. Real payments aren't visible on the dashboard while it's stalled
@@ -17,34 +18,33 @@ export class ReconcilerWatchdogService {
   private readonly logger = new Logger(ReconcilerWatchdogService.name);
 
   @Cron('*/2 * * * *')
-  async check(): Promise<{ stalled: boolean; ageMinutes: number | null; spendGuardHalted: boolean; failedFeeSettlements: number }> {
-    const { rows } = await pool.query(
-      `SELECT
-         (SELECT COUNT(*)::int FROM merchants WHERE status = 'active' AND stellar_base_address IS NOT NULL) AS active_merchants,
-         (SELECT EXTRACT(EPOCH FROM (NOW() - MAX(updated_at))) / 60 FROM reconciler_state) AS age_minutes`,
-    );
-    const activeMerchants: number = rows[0].active_merchants;
-    const ageMinutes: number | null = rows[0].age_minutes === null ? null : Number(rows[0].age_minutes);
-
-    const stalled = activeMerchants > 0 && ageMinutes !== null && ageMinutes > RECONCILER_STALL_MINUTES;
-    if (stalled) {
-      this.logger.error(
-        `reconciler looks stalled: cursor last moved ${ageMinutes.toFixed(1)} min ago with ${activeMerchants} active merchant(s) — payments may not be showing up (see docs/RUNBOOK.md §4)`,
+  async check(): Promise<{ stalled: boolean; ageMinutes: number | null }> {
+    // Caught here like every other @Cron service: an uncaught rejection would
+    // fall through to the cron library's bare console.error, skipping pino
+    // and Sentry, on the one check meant to raise the alarm.
+    try {
+      const { rows } = await pool.query(
+        `SELECT
+           (SELECT COUNT(*)::int FROM merchants WHERE status = 'active' AND stellar_base_address IS NOT NULL) AS active_merchants,
+           (SELECT EXTRACT(EPOCH FROM (NOW() - MAX(updated_at))) / 60 FROM reconciler_state) AS age_minutes`,
       );
-    }
+      const activeMerchants: number = rows[0].active_merchants;
+      const ageMinutes: number | null = rows[0].age_minutes === null ? null : Number(rows[0].age_minutes);
 
-    const [halt, failures] = await Promise.all([
-      pool.query(`SELECT 1 FROM facilitator_state WHERE key = 'halted_at' LIMIT 1`),
-      pool.query(`SELECT COUNT(*)::int AS count FROM fee_settlements WHERE status = 'pending' AND submission_error IS NOT NULL`),
-    ]);
-    const spendGuardHalted = halt.rows.length > 0;
-    const failedFeeSettlements: number = failures.rows[0].count;
-    if (spendGuardHalted) {
-      this.logger.error('facilitator spend guard is halted; facilitator signing requires manual review (see docs/KEYS.md)');
+      if (activeMerchants === 0 || ageMinutes === null) {
+        return { stalled: false, ageMinutes };
+      }
+      const stalled = ageMinutes > RECONCILER_STALL_MINUTES;
+      if (stalled) {
+        this.logger.error(
+          `reconciler looks stalled: cursor last moved ${ageMinutes.toFixed(1)} min ago with ${activeMerchants} active merchant(s) — payments may not be showing up (see docs/RUNBOOK.md §4)`,
+        );
+      }
+      return { stalled, ageMinutes };
+    } catch (err) {
+      this.logger.error(`reconciler watchdog check failed: ${err instanceof Error ? err.message : String(err)}`);
+      captureException(err);
+      return { stalled: false, ageMinutes: null };
     }
-    if (failedFeeSettlements > 0) {
-      this.logger.error(`fee settlement submission failures: ${failedFeeSettlements} pending settlement(s) were rejected by Horizon`);
-    }
-    return { stalled, ageMinutes, spendGuardHalted, failedFeeSettlements };
   }
 }

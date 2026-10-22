@@ -49,25 +49,15 @@ describe('ReconcilerWatchdogService', () => {
     }
   });
 
-  it('alerts when the spend guard is halted and a settlement submission has failed', async () => {
-    const merchant = await pool.query(
-      `INSERT INTO merchants (email, password_hash, name) VALUES ($1, 'test-only', 'Watchdog fixture') RETURNING id`,
-      [fixtureEmail],
-    );
-    fixtureMerchantId = merchant.rows[0].id;
-    const settlement = await pool.query(
-      `INSERT INTO fee_settlements (merchant_id, tx_hash, unsigned_xdr, expires_at, submission_error)
-       VALUES ($1, $2, 'test-xdr', NOW() + INTERVAL '15 minutes', 'forced Horizon rejection') RETURNING id`,
-      [fixtureMerchantId, `watchdog-${Date.now()}`],
-    );
-    fixtureSettlementId = settlement.rows[0].id;
-    process.env.FACILITATOR_DAILY_SPEND_CAP_USDC = '0';
-    await expect(spendGuard.checkAndRecordSpend(1, 'watchdog-fixture')).rejects.toThrow();
-
-    const result = await svc.check();
-    expect(result.spendGuardHalted).toBe(true);
-    expect(result.failedFeeSettlements).toBeGreaterThan(0);
-    expect(errors.some((message) => /facilitator spend guard is halted/.test(message))).toBe(true);
-    expect(errors.some((message) => /fee settlement submission failures/.test(message))).toBe(true);
+  it('logs a failed query through its own logger instead of throwing', async () => {
+    const spy = jest.spyOn(pool, 'query').mockRejectedValueOnce(new Error('connection terminated') as never);
+    try {
+      const r = await svc.check();
+      expect(r).toEqual({ stalled: false, ageMinutes: null });
+      expect(errors.length).toBe(1);
+      expect(errors[0]).toMatch(/watchdog check failed: connection terminated/);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

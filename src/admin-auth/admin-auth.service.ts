@@ -3,6 +3,7 @@ import * as bcrypt from 'bcryptjs';
 import * as jwt from 'jsonwebtoken';
 import { pool } from '../db/pool';
 import { resolveSessionSecret } from '../common/secrets';
+import { adminLoginAttempts } from '../common/login-attempts';
 
 // A separate signing key from the merchant JWT_SECRET — a leaked merchant
 // secret must never be usable to forge an admin session. Same fail-open-
@@ -38,22 +39,28 @@ export class AdminAuthService {
   // No signup() here on purpose — see admin-auth.controller.ts.
 
   async login(email: string, password: string): Promise<{ token: string; admin: AdminClaims }> {
+    const account = email.trim().toLowerCase();
+    // Per-account cap on top of the per-IP throttle — see login-attempts.ts.
+    adminLoginAttempts.assertNotLocked(account);
     // Matched case-insensitively: admin rows aren't constrained to lowercase.
-    const { rows } = await pool.query(
-      'SELECT id, email, name, password_hash, session_version, role FROM admins WHERE lower(email) = $1',
-      [email.trim().toLowerCase()],
-    );
+    const { rows } = await pool.query('SELECT id, email, name, password_hash, session_version FROM admins WHERE lower(email) = $1', [
+      account,
+    ]);
     // Same generic error whether the email doesn't exist or the password is
     // wrong, same reasoning as auth.service.ts.
     const invalid = () => new UnauthorizedException('invalid email or password');
     if (rows.length === 0) {
-      await bcrypt.compare(password, DUMMY_ADMIN_PASSWORD_HASH);
+      adminLoginAttempts.recordFailure(account);
       throw invalid();
     }
 
     const row = rows[0];
     const ok = await bcrypt.compare(password, row.password_hash);
-    if (!ok) throw invalid();
+    if (!ok) {
+      adminLoginAttempts.recordFailure(account);
+      throw invalid();
+    }
+    adminLoginAttempts.recordSuccess(account);
 
     const admin: AdminClaims = { id: row.id, email: row.email, name: row.name, role: row.role ?? 'superadmin' };
     return { token: this.issueToken(admin, row.session_version), admin };

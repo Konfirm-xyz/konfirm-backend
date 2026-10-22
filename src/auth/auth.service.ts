@@ -4,6 +4,7 @@ import * as bcrypt from 'bcryptjs';
 import * as jwt from 'jsonwebtoken';
 import { pool } from '../db/pool';
 import { assertDistinctSecrets, resolveSessionSecret } from '../common/secrets';
+import { merchantLoginAttempts } from '../common/login-attempts';
 import { MAILER, Mailer } from '../mail/mailer';
 
 // Production refuses to start without a real secret — see common/secrets.ts.
@@ -225,9 +226,12 @@ export class AuthService {
   }
 
   async login(email: string, password: string): Promise<{ token: string; merchant: MerchantClaims }> {
+    const account = normalizeEmail(email);
+    // Per-account cap on top of the per-IP throttle — see login-attempts.ts.
+    merchantLoginAttempts.assertNotLocked(account);
     const { rows } = await pool.query(
       'SELECT id, email, name, stellar_base_address, password_hash, status, session_version FROM merchants WHERE email = $1',
-      [normalizeEmail(email)],
+      [account],
     );
     // Same generic error whether the email doesn't exist or the password is
     // wrong — telling them apart lets an attacker enumerate real accounts.
@@ -236,12 +240,17 @@ export class AuthService {
       // Do the same bcrypt work as for a real account, so timing doesn't
       // reveal which emails are registered.
       await bcrypt.compare(password, DUMMY_PASSWORD_HASH);
+      merchantLoginAttempts.recordFailure(account);
       throw invalid();
     }
 
     const row = rows[0];
     const ok = await bcrypt.compare(password, row.password_hash);
-    if (!ok) throw invalid();
+    if (!ok) {
+      merchantLoginAttempts.recordFailure(account);
+      throw invalid();
+    }
+    merchantLoginAttempts.recordSuccess(account);
 
     // A distinct message is fine here, unlike above — a correct password
     // already confirms the account exists, so this isn't an enumeration risk.
