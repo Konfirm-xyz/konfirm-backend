@@ -3,12 +3,17 @@ use rust_decimal::Decimal;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use std::str::FromStr;
+use std::time::Duration;
 use uuid::Uuid;
 
 // Real Postgres, against the real migrations in db/migrations/. This
 // replaces the SQLite placeholder used earlier in the build — same
 // UNIQUE(paging_token) dedup guarantee, same "advance the cursor only after
 // the commit" discipline, now against the actual schema.
+
+const DB_ACQUIRE_TIMEOUT_SECS: u64 = 10;
+// A static literal: sqlx only accepts &'static str as query text.
+const DB_STATEMENT_TIMEOUT_SQL: &str = "SET statement_timeout = '30s'";
 
 #[derive(Clone)]
 pub struct Store {
@@ -67,8 +72,21 @@ fn resolve_effective_fee_bps(
 
 impl Store {
     pub async fn connect(database_url: &str) -> Result<Self> {
+        // Without these, a Postgres-side stall (lock contention, a half-open
+        // TCP connection) blocks a store.* .await forever inside a
+        // merchant's polling loop. Bounded, it surfaces as an Err the
+        // supervisor already logs and backs off from.
         let pool = PgPoolOptions::new()
             .max_connections(5)
+            .acquire_timeout(Duration::from_secs(DB_ACQUIRE_TIMEOUT_SECS))
+            .after_connect(|conn, _meta| {
+                Box::pin(async move {
+                    sqlx::query(DB_STATEMENT_TIMEOUT_SQL)
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok(())
+                })
+            })
             .connect(database_url)
             .await
             .context("failed to connect to Postgres")?;
