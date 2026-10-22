@@ -3,12 +3,17 @@ use rust_decimal::Decimal;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use std::str::FromStr;
+use std::time::Duration;
 use uuid::Uuid;
 
 // Real Postgres, against the real migrations in db/migrations/. This
 // replaces the SQLite placeholder used earlier in the build — same
 // UNIQUE(paging_token) dedup guarantee, same "advance the cursor only after
 // the commit" discipline, now against the actual schema.
+
+const DB_ACQUIRE_TIMEOUT_SECS: u64 = 10;
+// A static literal: sqlx only accepts &'static str as query text.
+const DB_STATEMENT_TIMEOUT_SQL: &str = "SET statement_timeout = '30s'";
 
 #[derive(Clone)]
 pub struct Store {
@@ -29,6 +34,10 @@ pub struct RecordedPayment {
     /// was stored 'held' with flag_reason 'duplicate_session' instead of
     /// failing the insert. See `record_payment_if_new`.
     pub duplicate_session: bool,
+    /// The link this payment was matched against (via link_sessions). NULL when
+    /// the payment had no session reservation — used by the caller to run
+    /// lifecycle controls (reusable / max_uses deactivation) after the insert.
+    pub link_id: Option<Uuid>,
 }
 
 /// The partial unique index allowing one primary payment per session
@@ -63,8 +72,21 @@ fn resolve_effective_fee_bps(
 
 impl Store {
     pub async fn connect(database_url: &str) -> Result<Self> {
+        // Without these, a Postgres-side stall (lock contention, a half-open
+        // TCP connection) blocks a store.* .await forever inside a
+        // merchant's polling loop. Bounded, it surfaces as an Err the
+        // supervisor already logs and backs off from.
         let pool = PgPoolOptions::new()
             .max_connections(5)
+            .acquire_timeout(Duration::from_secs(DB_ACQUIRE_TIMEOUT_SECS))
+            .after_connect(|conn, _meta| {
+                Box::pin(async move {
+                    sqlx::query(DB_STATEMENT_TIMEOUT_SQL)
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok(())
+                })
+            })
             .connect(database_url)
             .await
             .context("failed to connect to Postgres")?;
@@ -110,6 +132,46 @@ impl Store {
             .fetch_optional(&self.pool)
             .await?;
         Ok(row.is_some())
+    }
+
+    /// Called synchronously after a payment is confirmed as 'paid' — deactivates
+    /// the link if:
+    ///   - reusable = false (single-use link, must stop after first payment), OR
+    ///   - max_uses IS NOT NULL AND
+    ///     COUNT of paid payments for this link >= max_uses (cap reached).
+    ///
+    /// A link_id of NULL means the payment had no session and is not tied to any
+    /// link, so this is a no-op. A link that was already inactive is also a
+    /// no-op — the WHERE clause's `active = true` guard prevents duplicate UPDATEs
+    /// and makes the call safe to retry.
+    ///
+    /// The use_count is recounted from the payments table (COUNT WHERE status='paid')
+    /// rather than being passed in, so this is always accurate against the real
+    /// committed state — no risk of an off-by-one from a cached value.
+    pub async fn maybe_deactivate_link(&self, link_id: Option<Uuid>) -> Result<()> {
+        let Some(link_id) = link_id else {
+            return Ok(());
+        };
+        sqlx::query(
+            "UPDATE links
+             SET active = false
+             WHERE id = $1
+               AND active = true
+               AND (
+                 reusable = false
+                 OR (
+                   max_uses IS NOT NULL
+                   AND (
+                     SELECT COUNT(*) FROM payments
+                     WHERE link_id = $1 AND status = 'paid'
+                   ) >= max_uses
+                 )
+               )",
+        )
+        .bind(link_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// Called by the background on-chain compliance check, never inline in
@@ -219,10 +281,7 @@ impl Store {
         // the high 32 bits, tx order and op order in the low 32. Decoding it
         // is the correct way to get ledger_sequence without a second round
         // trip to fetch the transaction.
-        let ledger_sequence: i64 = paging_token
-            .parse::<u64>()
-            .map(|toid| (toid >> 32) as i64)
-            .unwrap_or(0);
+        let ledger_sequence = ledger_sequence_from_paging_token(paging_token);
 
         let link_id: Option<Uuid> = sqlx::query_as::<_, (Uuid,)>(
             "SELECT link_id FROM link_sessions WHERE merchant_id = $1 AND muxed_id = $2",
@@ -290,7 +349,7 @@ impl Store {
             }
         };
 
-        Ok(inserted.map(|(id,)| RecordedPayment { id, locally_blocked, duplicate_session }))
+        Ok(inserted.map(|(id,)| RecordedPayment { id, locally_blocked, duplicate_session, link_id }))
     }
 
     /// What the session reserved for this muxed id: its link, expected amount
@@ -421,9 +480,28 @@ impl Store {
     }
 }
 
+/// The ledger sequence encoded in a Horizon operation paging token (a TOID:
+/// ledger in the high 32 bits). 0 when the token isn't a TOID.
+fn ledger_sequence_from_paging_token(token: &str) -> i64 {
+    token.parse::<u64>().map(|toid| (toid >> 32) as i64).unwrap_or(0)
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn ledger_sequence_is_the_high_32_bits_of_the_toid() {
+        // Ledger 123456, tx order 7, op order 1.
+        let toid: u64 = (123_456u64 << 32) | (7 << 12) | 1;
+        assert_eq!(ledger_sequence_from_paging_token(&toid.to_string()), 123_456);
+        assert_eq!(ledger_sequence_from_paging_token("530841924481025"), 123_596);
+    }
+
+    #[test]
+    fn non_toid_paging_token_decodes_to_zero() {
+        assert_eq!(ledger_sequence_from_paging_token("not-a-toid"), 0);
+    }
 
     #[test]
     fn no_promo_uses_the_base_rate() {

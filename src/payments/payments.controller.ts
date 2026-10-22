@@ -5,7 +5,8 @@ import { AuthedRequest, AuthGuard } from '../auth/auth.guard';
 import { nonNegativeIntegerStringSchema, POSTGRES_BIGINT_MAX } from '../common/numeric-validation';
 import { PaymentsService } from './payments.service';
 
-const muxedIdSchema = nonNegativeIntegerStringSchema(POSTGRES_BIGINT_MAX, 'muxed_id');
+// Same shape check as deposits.controller.ts's account fields.
+const STELLAR_ADDRESS = /^G[A-Z2-7]{55}$/;
 
 @Controller('payments')
 export class PaymentsController {
@@ -37,7 +38,11 @@ export class PaymentsController {
     if (!linkId || !muxedId || !payer) {
       throw new BadRequestException('linkId, muxed_id, and payer are all required');
     }
-    this.validateMuxedId(muxedId);
+    // Checked here, before the service hands it to Horizon: a malformed
+    // address otherwise gets retried by withRetry and surfaces as a 500.
+    if (!STELLAR_ADDRESS.test(payer)) {
+      throw new BadRequestException('payer must be a valid Stellar address');
+    }
     return this.payments.prepareTx(linkId, muxedId, payer);
   }
 
@@ -46,13 +51,17 @@ export class PaymentsController {
     summary: 'Build a SEP-7 pay URI for QR/mobile-wallet checkout',
     description:
       'Returns a `web+stellar:pay` URI. No payer address is needed or knowable at this point — ' +
-      'the payer\'s own wallet builds its transaction from the request parameters.',
+      'the payer\'s own wallet builds its transaction from the request parameters. ' +
+      'Refuses to serve a URI for links with a non-zero effective platform fee, since a SEP-7 ' +
+      '`pay` request can only express a single payment and would bypass the fee; those ' +
+      'checkouts must use /payments/prepare-tx instead.',
   })
   @ApiQuery({ name: 'linkId', required: true, description: 'Payment link UUID', type: 'string' })
   @ApiQuery({ name: 'muxed_id', required: true, description: 'Stringified u64 muxed ID reserved by the payer', type: 'string' })
   @ApiResponse({ status: 200, description: 'SEP-7 URI string.' })
   @ApiResponse({ status: 400, description: 'Missing required query parameters.' })
   @ApiResponse({ status: 404, description: 'Link not found.' })
+  @ApiResponse({ status: 409, description: 'Link carries a non-zero platform fee; use prepare-tx.' })
   buildPayUri(@Query('linkId') linkId: string, @Query('muxed_id') muxedId: string) {
     if (!linkId || !muxedId) {
       throw new BadRequestException('linkId and muxed_id are both required');

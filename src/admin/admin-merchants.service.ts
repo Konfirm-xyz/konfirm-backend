@@ -1,11 +1,11 @@
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { pool } from '../db/pool';
 
 @Injectable()
 export class AdminMerchantsService {
   async list(limit = 50, offset = 0) {
     const { rows } = await pool.query(
-      `SELECT id, email, name, status, risk_tier, stellar_base_address, created_at
+      `SELECT id, email, name, status, risk_tier, fee_bps, stellar_base_address, created_at
        FROM merchants
        ORDER BY created_at DESC
        LIMIT $1 OFFSET $2`,
@@ -56,5 +56,56 @@ export class AdminMerchantsService {
     if (rows.length === 0) throw new NotFoundException('merchant not found');
     const { previous_risk_tier: previous, ...merchant } = rows[0];
     return { merchant, previous: previous as string };
+  }
+
+  // Admin-assisted profile override (issue #38).  Accepts any subset of
+  // name / email / stellar_base_address.  Email changes bypass the
+  // two-step verification flow that self-service uses — admins can apply
+  // them directly as a support action.  When an email is changed here the
+  // session_version is NOT bumped: the merchant's existing sessions remain
+  // valid so a support action doesn't unexpectedly log them out mid-session.
+  // The caller (AdminController) logs this to admin_actions.
+  async updateProfile(
+    id: string,
+    fields: { name?: string; email?: string; stellar_base_address?: string },
+  ) {
+    const sets: string[] = [];
+    const params: unknown[] = [id];
+
+    if (fields.name !== undefined) {
+      params.push(fields.name);
+      sets.push(`name = $${params.length}`);
+    }
+    if (fields.email !== undefined) {
+      // Reject if the new address is already taken by another merchant.
+      const { rows: conflict } = await pool.query(
+        'SELECT id FROM merchants WHERE email = $1 AND id <> $2',
+        [fields.email, id],
+      );
+      if (conflict.length > 0) {
+        throw new ConflictException('an account with this email already exists');
+      }
+      params.push(fields.email);
+      sets.push(`email = $${params.length}`);
+    }
+    if (fields.stellar_base_address !== undefined) {
+      params.push(fields.stellar_base_address);
+      sets.push(`stellar_base_address = $${params.length}`);
+    }
+
+    if (sets.length === 0) {
+      throw new BadRequestException('no fields to update');
+    }
+
+    sets.push('updated_at = NOW()');
+
+    const { rows } = await pool.query(
+      `UPDATE merchants SET ${sets.join(', ')}
+       WHERE id = $1
+       RETURNING id, email, name, stellar_base_address, status, risk_tier`,
+      params,
+    );
+    if (rows.length === 0) throw new NotFoundException('merchant not found');
+    return rows[0];
   }
 }

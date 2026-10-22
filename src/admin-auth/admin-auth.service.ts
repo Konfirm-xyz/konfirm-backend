@@ -3,6 +3,7 @@ import * as bcrypt from 'bcryptjs';
 import * as jwt from 'jsonwebtoken';
 import { pool } from '../db/pool';
 import { resolveSessionSecret } from '../common/secrets';
+import { adminLoginAttempts } from '../common/login-attempts';
 
 // A separate signing key from the merchant JWT_SECRET — a leaked merchant
 // secret must never be usable to forge an admin session. Same fail-open-
@@ -19,10 +20,17 @@ const TOKEN_TTL = '12h';
 // (10) as db/seed-admin.ts, so both paths take as long.
 const DUMMY_ADMIN_PASSWORD_HASH = bcrypt.hashSync('timing-equaliser-not-a-real-admin-password', 10);
 
+// Role carried on the admin session. `superadmin` is fully privileged;
+// `support` is scoped to payments/merchants and blocked from compliance,
+// treasury, and facilitator routes by AdminGuard. Defaults to `superadmin`
+// for rows created before the role column existed.
+export type AdminRole = 'superadmin' | 'support';
+
 export interface AdminClaims {
   id: string;
   email: string;
   name: string;
+  role: AdminRole;
   sv?: number;
 }
 
@@ -31,29 +39,39 @@ export class AdminAuthService {
   // No signup() here on purpose — see admin-auth.controller.ts.
 
   async login(email: string, password: string): Promise<{ token: string; admin: AdminClaims }> {
+    const account = email.trim().toLowerCase();
+    // Per-account cap on top of the per-IP throttle — see login-attempts.ts.
+    adminLoginAttempts.assertNotLocked(account);
     // Matched case-insensitively: admin rows aren't constrained to lowercase.
     const { rows } = await pool.query('SELECT id, email, name, password_hash, session_version FROM admins WHERE lower(email) = $1', [
-      email.trim().toLowerCase(),
+      account,
     ]);
     // Same generic error whether the email doesn't exist or the password is
     // wrong, same reasoning as auth.service.ts.
     const invalid = () => new UnauthorizedException('invalid email or password');
     if (rows.length === 0) {
-      await bcrypt.compare(password, DUMMY_ADMIN_PASSWORD_HASH);
+      adminLoginAttempts.recordFailure(account);
       throw invalid();
     }
 
     const row = rows[0];
     const ok = await bcrypt.compare(password, row.password_hash);
-    if (!ok) throw invalid();
+    if (!ok) {
+      adminLoginAttempts.recordFailure(account);
+      throw invalid();
+    }
+    adminLoginAttempts.recordSuccess(account);
 
-    const admin: AdminClaims = { id: row.id, email: row.email, name: row.name };
+    const admin: AdminClaims = { id: row.id, email: row.email, name: row.name, role: row.role ?? 'superadmin' };
     return { token: this.issueToken(admin, row.session_version), admin };
   }
 
   verifyToken(token: string): AdminClaims {
     try {
-      return jwt.verify(token, ADMIN_JWT_SECRET) as unknown as AdminClaims;
+      const claims = jwt.verify(token, ADMIN_JWT_SECRET) as unknown as AdminClaims;
+      // Tokens minted before the role claim existed carry no role; treat them
+      // as superadmin so existing sessions keep working after the migration.
+      return { ...claims, role: claims.role ?? 'superadmin' };
     } catch {
       throw new UnauthorizedException('session expired or invalid — please log in again');
     }
@@ -82,7 +100,7 @@ export class AdminAuthService {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      const { rows } = await client.query('SELECT id, email, name, password_hash FROM admins WHERE id = $1 FOR UPDATE', [adminId]);
+      const { rows } = await client.query('SELECT id, email, name, password_hash, role FROM admins WHERE id = $1 FOR UPDATE', [adminId]);
       if (rows.length === 0) {
         throw new UnauthorizedException('session expired or invalid — please log in again');
       }
@@ -109,7 +127,7 @@ export class AdminAuthService {
       );
       await client.query('COMMIT');
 
-      const admin: AdminClaims = { id: row.id, email: row.email, name: row.name };
+      const admin: AdminClaims = { id: row.id, email: row.email, name: row.name, role: row.role ?? 'superadmin' };
       return { token: this.issueToken(admin, updated.rows[0].session_version), admin };
     } catch (err) {
       await client.query('ROLLBACK');
@@ -120,8 +138,10 @@ export class AdminAuthService {
   }
 
   private issueToken(admin: AdminClaims, sessionVersion: number): string {
-    return jwt.sign({ id: admin.id, email: admin.email, name: admin.name, sv: sessionVersion }, ADMIN_JWT_SECRET, {
-      expiresIn: TOKEN_TTL,
-    });
+    return jwt.sign(
+      { id: admin.id, email: admin.email, name: admin.name, role: admin.role, sv: sessionVersion },
+      ADMIN_JWT_SECRET,
+      { expiresIn: TOKEN_TTL },
+    );
   }
 }

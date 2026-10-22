@@ -18,6 +18,7 @@ import { X402Module } from './x402/x402.module';
 import { ReferralsModule } from './referrals/referrals.module';
 import { FacilitatorModule } from './facilitator/facilitator.module';
 import { BazaarModule } from './bazaar/bazaar.module';
+import { HealthModule } from './health/health.module';
 
 const isProd = process.env.NODE_ENV === 'production';
 
@@ -73,6 +74,7 @@ const isProd = process.env.NODE_ENV === 'production';
     FacilitatorModule,
     BazaarModule,
     FeesModule,
+    HealthModule,
   ],
   providers: [
     ReconcilerWatchdogService,
