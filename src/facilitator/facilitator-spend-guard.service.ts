@@ -211,4 +211,26 @@ export class FacilitatorSpendGuardService implements OnModuleInit {
     capConfigError: string | null;
     spentTodayUsdc: number;
   }> {
-    // RETURNING captures e
+    // RETURNING captures exactly what this DELETE cleared, so the caller can
+    // put it in the audit log -- otherwise the halt reason is gone for good.
+    const [cleared, capOverride, spend] = await Promise.all([
+      pool.query<{ key: string; value: string }>(
+        'DELETE FROM facilitator_state WHERE key IN ($1, $2) RETURNING key, value',
+        [HALT_KEY, HALT_REASON_KEY],
+      ),
+      pool.query<{ value: string }>('SELECT value FROM facilitator_state WHERE key = $1', [CAP_OVERRIDE_KEY]),
+      pool.query<{ total: string }>(
+        `SELECT COALESCE(SUM(amount_usdc), 0) AS total FROM facilitator_spend_log WHERE created_at >= date_trunc('day', NOW())`,
+      ),
+    ]);
+    const byKey = new Map(cleared.rows.map((r) => [r.key, r.value]));
+    const cap = resolveDailyCapConfig(capOverride.rows[0]?.value);
+    return {
+      haltedAt: byKey.get(HALT_KEY) ?? null,
+      haltReason: byKey.get(HALT_REASON_KEY) ?? null,
+      capUsdc: cap.capUsdc,
+      capConfigError: cap.configError,
+      spentTodayUsdc: Number(spend.rows[0].total),
+    };
+  }
+}

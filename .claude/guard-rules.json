@@ -1,0 +1,4 @@
+[
+  { "pattern": "\\bS[A-Z2-7]{55}\\b", "why": "That looks like a raw Stellar secret seed typed into a command. Never commit, log, or print a secret key — use the named env var (e.g. STELLAR_DEPLOYER_SECRET_KEY) or the KMS key id instead." },
+  { "pattern": "gh\\s+issue\\s+close\\b", "why": "Don't close a GitHub issue from a command — this repo's audit found issues closed by unrelated merges with no real fix applied (konfirm-backend#29). Close issues through a reviewed PR merge, or ask the user first if closing manually." }
+]
