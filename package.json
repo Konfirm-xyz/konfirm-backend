@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-kms": "^3.1131.0",
-    "@nestjs/common": "^11.1.28",
+    "@nestjs/common": "^12.2.0",
     "@nestjs/core": "^11.1.28",
     "@nestjs/platform-express": "^11.1.28",
     "@nestjs/schedule": "^6.1.3",
