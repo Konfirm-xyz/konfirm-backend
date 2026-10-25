@@ -8,6 +8,8 @@ import { PaymentsService } from './payments.service';
 // Same shape check as deposits.controller.ts's account fields.
 const STELLAR_ADDRESS = /^G[A-Z2-7]{55}$/;
 
+const muxedIdSchema = nonNegativeIntegerStringSchema(POSTGRES_BIGINT_MAX, 'muxed_id');
+
 @Controller('payments')
 export class PaymentsController {
   constructor(private readonly payments: PaymentsService) {}
@@ -43,6 +45,7 @@ export class PaymentsController {
     if (!STELLAR_ADDRESS.test(payer)) {
       throw new BadRequestException('payer must be a valid Stellar address');
     }
+    this.validateMuxedId(muxedId);
     return this.payments.prepareTx(linkId, muxedId, payer);
   }
 

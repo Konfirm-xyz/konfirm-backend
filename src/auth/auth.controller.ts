@@ -27,24 +27,31 @@ const passwordSchema = z
 const emailSchema = z.string().trim().toLowerCase().email();
 
 const signupSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(8),
-  name: z.string().min(1),
-  stellar_base_address: z.string().optional(),
+  email: emailSchema,
+  password: passwordSchema,
+  name: z.string().min(1).max(200),
+  // Stellar strkey account id — base32, no checksum validation here; a
+  // malformed address fails loudly the first time a payout is attempted,
+  // which is an acceptable place for that error to surface for a pilot.
+  stellar_base_address: z.string().regex(/^G[A-Z2-7]{55}$/, 'must be a valid Stellar G... address'),
+  // Optional -- an invalid/mistyped code never blocks signup, see
+  // AuthService.signup(). Loosely validated here only to reject obviously
+  // malformed input before it reaches a query.
+  referral_code: z.string().max(20).optional(),
 });
 
 const loginSchema = z.object({
-  email: z.string().email(),
-  password: z.string(),
+  email: emailSchema,
+  password: z.string().min(1),
 });
 
 const forgotPasswordSchema = z.object({
-  email: z.string().email(),
+  email: emailSchema,
 });
 
 const resetPasswordSchema = z.object({
-  token: z.string(),
-  password: z.string().min(8),
+  token: z.string().min(20).max(200),
+  password: passwordSchema,
 });
 
 // Tighter limit for flows that send email (same ceiling as forgot-password).
@@ -106,11 +113,8 @@ export class AuthController {
       body.stellar_base_address,
       body.referral_code,
     );
-    const merchant = result.rows[0];
-    if (!merchant) {
-      return res.status(404).json({ error: 'not_found' });
-    }
-    return { ok: true };
+    this.setSessionCookie(res, token);
+    return { merchant };
   }
 
   @Post('reset-password')
@@ -305,13 +309,4 @@ export class AuthController {
       maxAge: COOKIE_MAX_AGE_MS,
     });
   }
-}
-
-export async function referrals(req: Request, res: Response) {
-  const merchantId = (req as any).merchantId;
-  const result = await pool.query(
-    `SELECT id, code, created_at FROM referral_codes WHERE merchant_id = $1`,
-    [merchantId]
-  );
-  return res.json({ referrals: result.rows });
 }

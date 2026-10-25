@@ -28,6 +28,12 @@ ALTER TABLE merchants ADD COLUMN IF NOT EXISTS referrer_reward_count INT NOT NUL
 ALTER TABLE merchants ADD COLUMN IF NOT EXISTS reward_qualifying_payment_id UUID;
 ALTER TABLE merchants ADD COLUMN IF NOT EXISTS reward_revoked_at TIMESTAMPTZ;
 
+-- Timestamp of the grant that produced the current reward_qualifying_payment_id
+-- above. Distinct from referrals.reward_granted_at (migration 015), which is a
+-- one-shot idempotency guard per referral row; this one is per-merchant and
+-- exists only so the partial index below can find "still outstanding" grants.
+ALTER TABLE merchants ADD COLUMN IF NOT EXISTS reward_granted_at TIMESTAMPTZ;
+
 -- Supports the reversal sweep: find referrers whose grant is still in force
 -- and whose qualifying payment has since become disputed/refunded.
 CREATE INDEX IF NOT EXISTS idx_merchants_reward_reversal

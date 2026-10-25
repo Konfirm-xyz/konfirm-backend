@@ -112,11 +112,15 @@ function buildNumberSchema(schema: z.ZodNumber): SchemaObject {
   for (const check of checks) {
     if (check.kind === 'min') {
       result.minimum = check.value as number;
-      if (check.inclusive === false) result.exclusiveMinimum = check.value as number;
+      // OpenAPI 3.0's SchemaObject (@nestjs/swagger) uses the 3.0-era
+      // boolean exclusiveMinimum/exclusiveMaximum flags paired with
+      // minimum/maximum — not the 3.1/JSON-Schema style where
+      // exclusiveMinimum itself holds the boundary value.
+      if (check.inclusive === false) result.exclusiveMinimum = true;
     }
     if (check.kind === 'max') {
       result.maximum = check.value as number;
-      if (check.inclusive === false) result.exclusiveMaximum = check.value as number;
+      if (check.inclusive === false) result.exclusiveMaximum = true;
     }
     if (check.kind === 'int') result.type = 'integer';
   }
