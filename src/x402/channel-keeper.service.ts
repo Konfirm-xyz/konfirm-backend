@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { pool } from '../db/pool';
+import { getFacilitatorSigner } from '../common/facilitator-signer';
 import { ChannelService, FacilitatorCallResult } from './channel.service';
 
 // The on-chain channel contract was deployed with challenge_period_secs =
@@ -84,20 +85,17 @@ const ATTEMPT_DUE = '(keeper_next_attempt_at IS NULL OR keeper_next_attempt_at <
 // the same Postgres pool and Soroban signer api already owns, so coupling
 // its uptime to api's restarts is a reasonable, explicit trade.
 //
-// Idle-close is NOT implemented here. This is a real architectural gap
-// found while building this, not a deferred nice-to-have: initiate_close()
-// requires require_auth() from the channel's payer or payee specifically
-// (konfirm-contracts/contracts/channel/src/lib.rs:222-227) — the
-// facilitator is neither party in the general case (an agent pays a
-// resource server; Konfirm just relays), so there is no live signature for
-// the keeper to relay on an idle channel, unlike checkpoint()/
-// finalize_close(), which need no party auth at all. logIdleChannels()
-// below still surfaces idle channels so the gap is visible operationally,
-// but does not attempt (and fail) an initiate_close() call the keeper has
-// no authority to make. The real fix needs an open-time or contract design
-// change (e.g. an optional delegated-closer address captured by
-// open_channel) — out of scope here since it touches the deployed
-// contract, not just the backend.
+// Idle-close: the contract was redeployed (PRD docs/PRD.md M2) with the
+// open-time delegated-closer this module's previous comment said was the
+// real fix needed — initiate_close() now accepts a caller who is neither
+// payer nor payee, as long as the channel's delegated_closer equals that
+// caller (konfirm-contracts/contracts/channel/src/lib.rs's
+// initiate_close). ChannelService.openChannel() records whether the payer
+// actually granted that to this facilitator (column: delegated_closer on
+// x402_channels); sweepIdleClose() below only attempts initiate_close on
+// channels where it was. A payer who declined just has no idle-close
+// safety net for that channel — logIdleChannels() still reports those so
+// the gap stays visible operationally, same as before.
 @Injectable()
 export class ChannelKeeperService {
   private readonly logger = new Logger(ChannelKeeperService.name);
@@ -120,6 +118,7 @@ export class ChannelKeeperService {
         await this.sweepCheckpointsDue();
         await this.sweepFinalizeDue();
         await this.sweepWatchtower();
+        await this.sweepIdleClose();
         await this.logIdleChannels();
         await this.logStuckChannels();
       } finally {
@@ -280,20 +279,45 @@ export class ChannelKeeperService {
     }
   }
 
-  // No auto-close attempted (see module comment) — this only makes the gap
-  // visible operationally instead of silent, so a human can decide whether
-  // to reach out to the resource server (the likely payee-side operator)
-  // to request a close, or accept the channel sitting open.
+  // Channels idle 7+ days where the payer granted this facilitator
+  // delegated_closer at open time (see openChannel's delegatedCloser
+  // check) — the one case where the keeper actually has the authority to
+  // start the close itself. initiate_close() is idempotent against
+  // already-closing/closed channels (NotOpen), so re-attempting one that
+  // moved on since the row was read just fails harmlessly and clears on
+  // the next resync.
+  private async sweepIdleClose(): Promise<void> {
+    const signer = await getFacilitatorSigner();
+    const { rows } = await pool.query<{ onchain_channel_id: string; keeper_failure_count: number }>(
+      `SELECT onchain_channel_id, keeper_failure_count
+       FROM x402_channels
+       WHERE status = 'open' AND delegated_closer = $1
+         AND last_activity_at < NOW() - INTERVAL '168 hours' AND ${ATTEMPT_DUE}`,
+      [signer.address],
+    );
+    for (const row of rows) {
+      const onchainChannelId = BigInt(row.onchain_channel_id);
+      const result = await this.channel.initiateCloseAsDelegate(onchainChannelId);
+      await this.recordAttempt(onchainChannelId, 'initiate_close', row.keeper_failure_count, result);
+      await this.resyncFromChain(onchainChannelId);
+    }
+  }
+
+  // Channels idle 7+ days with no delegated_closer granted — the keeper has
+  // no authority to close these (see module comment), so this only makes
+  // the gap visible operationally instead of silent, so a human can decide
+  // whether to reach out to the resource server (the likely payee-side
+  // operator) to request a close, or accept the channel sitting open.
   private async logIdleChannels(): Promise<void> {
     const { rows } = await pool.query<{ onchain_channel_id: string; idle_days: number }>(
       `SELECT onchain_channel_id, EXTRACT(DAY FROM NOW() - last_activity_at)::int AS idle_days
        FROM x402_channels
-       WHERE status = 'open' AND last_activity_at < NOW() - INTERVAL '168 hours'`,
+       WHERE status = 'open' AND delegated_closer IS NULL AND last_activity_at < NOW() - INTERVAL '168 hours'`,
     );
     for (const row of rows) {
       this.logger.warn(
-        `channel ${row.onchain_channel_id} idle for ${row.idle_days} days — no automatic close ` +
-          `(facilitator is not a channel party; see module comment). Manual /x402/channel/close needed.`,
+        `channel ${row.onchain_channel_id} idle for ${row.idle_days} days — no delegated_closer was ` +
+          `granted at open time, so the keeper has no authority to close it. Manual /x402/channel/close needed.`,
       );
     }
   }

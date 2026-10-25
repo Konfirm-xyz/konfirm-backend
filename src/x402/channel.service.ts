@@ -182,7 +182,11 @@ export class ChannelService {
     if (contractAddress !== CHANNEL_CONTRACT_ID) {
       return { success: false, errorReason: 'wrong_contract' };
     }
-    if (functionName !== 'open_channel' || args.length !== 5) {
+    // 6 args, matching the deployed contract's real signature (payer, payee,
+    // token, payer_pubkey, deposit, delegated_closer) — this facilitator
+    // used to check for 5, rejecting every real open_channel call the
+    // redeployed contract actually accepts. See PRD docs/PRD.md M2.
+    if (functionName !== 'open_channel' || args.length !== 6) {
       return { success: false, errorReason: 'wrong_function' };
     }
 
@@ -191,9 +195,24 @@ export class ChannelService {
     const tokenAddress = scValToNative(args[2]) as string;
     const payerPubkey = scValToNative(args[3]) as Buffer;
     const deposit = scValToNative(args[4]) as bigint;
+    // Option<Address> — scValToNative gives undefined/null for None, a
+    // G... string for Some(addr).
+    const delegatedCloser = (scValToNative(args[5]) as string | null | undefined) ?? null;
 
     if (payerAddress === signer.address) {
       return { success: false, errorReason: 'facilitator_is_payer' };
+    }
+
+    // The facilitator can only ever force-close an idle channel (see
+    // ChannelKeeperService.sweepIdleClose) if the payer granted it
+    // delegated_closer at open time. A payer may legitimately decline
+    // (delegatedCloser === null) — that just means this channel has no
+    // idle-close safety net, not an error. But delegating to anyone other
+    // than this facilitator is almost certainly a client bug (the
+    // delegate they named can never actually call initiate_close through
+    // this facilitator), so it's rejected rather than silently accepted.
+    if (delegatedCloser !== null && delegatedCloser !== signer.address) {
+      return { success: false, errorReason: 'delegated_closer_not_facilitator' };
     }
 
     // Compliance gate, once, at open time — not deferred to settlement.
@@ -266,10 +285,19 @@ export class ChannelService {
 
     const onchainChannelId = (submission.returnValue as bigint).toString();
     await pool.query(
-      `INSERT INTO x402_channels (onchain_channel_id, payer_address, payee_address, asset_contract, payer_pubkey, deposited, resource_url)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO x402_channels (onchain_channel_id, payer_address, payee_address, asset_contract, payer_pubkey, deposited, resource_url, delegated_closer)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        ON CONFLICT (onchain_channel_id) DO NOTHING`,
-      [onchainChannelId, payerAddress, payeeAddress, tokenAddress, payerPubkey.toString('hex'), deposit.toString(), params.resourceUrl ?? null],
+      [
+        onchainChannelId,
+        payerAddress,
+        payeeAddress,
+        tokenAddress,
+        payerPubkey.toString('hex'),
+        deposit.toString(),
+        params.resourceUrl ?? null,
+        delegatedCloser,
+      ],
     );
 
     return { success: true, onchainChannelId, transaction: submission.hash };
@@ -431,6 +459,27 @@ export class ChannelService {
       'finalize_close',
       [nativeToScVal(onchainChannelId, { type: 'u64' })],
       'finalize_close',
+    );
+  }
+
+  // initiate_close() requires require_auth() from its `caller` arg
+  // (konfirm-contracts/contracts/channel/src/lib.rs's initiate_close),
+  // unlike finalize_close()'s fully permissionless call above. That's
+  // satisfied here with no separate auth entry: submitFacilitatorCall
+  // builds the transaction with the facilitator's own account as source,
+  // and passing that same address as `caller` lets Soroban's source-account
+  // authorization shortcut cover it — only valid because caller === the
+  // signing account, which is exactly the delegated-closer case this
+  // method exists for. Only call this for a channel where
+  // delegated_closer was actually granted to the facilitator at open time
+  // (see openChannel's delegatedCloser check) — the contract itself also
+  // enforces this and will reject otherwise.
+  async initiateCloseAsDelegate(onchainChannelId: bigint): Promise<FacilitatorCallResult> {
+    const signer = await getFacilitatorSigner();
+    return this.submitFacilitatorCall(
+      'initiate_close',
+      [new Address(signer.address).toScVal(), nativeToScVal(onchainChannelId, { type: 'u64' })],
+      'initiate_close',
     );
   }
 
