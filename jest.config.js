@@ -20,6 +20,7 @@ const LIVE_NETWORK_SPECS = [
   '<rootDir>/test/admin.e2e-spec.ts',
   '<rootDir>/test/fees.e2e-spec.ts',
   '<rootDir>/src/admin/admin-treasury-settlements.service.spec.ts',
+  '<rootDir>/src/admin/admin-treasury-settlements-tx.service.spec.ts',
 ];
 
 const shared = {

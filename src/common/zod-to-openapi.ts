@@ -112,11 +112,15 @@ function buildNumberSchema(schema: z.ZodNumber): SchemaObject {
   for (const check of checks) {
     if (check.kind === 'min') {
       result.minimum = check.value as number;
-      if (check.inclusive === false) result.exclusiveMinimum = check.value as number;
+      // OAS 3.0's SchemaObject (what @nestjs/swagger types against) models
+      // exclusive bounds as a boolean flag alongside `minimum`/`maximum`,
+      // not as the OAS 3.1 style of the bound itself replacing the flag --
+      // `minimum` above already carries the value either way.
+      if (check.inclusive === false) result.exclusiveMinimum = true;
     }
     if (check.kind === 'max') {
       result.maximum = check.value as number;
-      if (check.inclusive === false) result.exclusiveMaximum = check.value as number;
+      if (check.inclusive === false) result.exclusiveMaximum = true;
     }
     if (check.kind === 'int') result.type = 'integer';
   }
