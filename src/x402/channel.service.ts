@@ -7,7 +7,6 @@ import {
   Networks,
   Transaction,
   TransactionBuilder,
-  Operation,
   nativeToScVal,
   scValToNative,
   rpc,
@@ -244,18 +243,28 @@ export class ChannelService {
       { ok: true; hash: string; returnValue: unknown } | { ok: false; result: OpenChannelResult }
     > => {
       try {
-        const facilitatorAccount = await server.getAccount(signer.address);
-        const sorobanData = simResponse.transactionData.build();
-        const rebuiltTx = new TransactionBuilder(facilitatorAccount, {
-          fee: BASE_FEE,
-          networkPassphrase: NETWORK_PASSPHRASE,
-          sorobanData,
-        })
-          .setTimeout(60)
-          .addOperation(Operation.invokeHostFunction(operation))
-          .build();
+        // Fee-bump, not a rebuild with the facilitator as the inner tx's
+        // source: open_channel's auth for `payer` is real_auth'd by the
+        // payer client-side, as a `source_account`-credentialed entry
+        // (correct, since the payer genuinely is that tx's source when
+        // they build+simulate+sign it). Rebuilding the inner tx with the
+        // facilitator as its new source — as this used to do — silently
+        // reinterprets that credential as authorizing the facilitator
+        // instead, and the contract's payer.require_auth() then traps.
+        // Confirmed live against the real redeployed contract: the old
+        // rebuild failed every time with a generic VM trap; fee-bumping
+        // the payer's own already-signed, already-assembled transaction
+        // byte-for-byte (never touching its source, sequence, or auth)
+        // succeeds. This is also the Stellar-native mechanism built for
+        // exactly this "someone else sponsors the fee" case, not a
+        // workaround. The payer's client is expected to have already
+        // simulated and assembled (attached sorobanData) before signing —
+        // standard practice for any Soroban-signing wallet, and required
+        // for the signature they already embedded to cover the real
+        // resource footprint.
+        const feeBump = TransactionBuilder.buildFeeBumpTransaction(signer.address, BASE_FEE, transaction, NETWORK_PASSPHRASE);
 
-        const { signedTxXdr, error: signError } = await signer.signTransaction(rebuiltTx.toXDR(), {
+        const { signedTxXdr, error: signError } = await signer.signTransaction(feeBump.toXDR(), {
           networkPassphrase: NETWORK_PASSPHRASE,
         });
         if (signError || !signedTxXdr) {
@@ -382,18 +391,13 @@ export class ChannelService {
       { ok: true; hash: string } | { ok: false; result: CloseChannelResult }
     > => {
       try {
-        const facilitatorAccount = await server.getAccount(signer.address);
-        const sorobanData = simResponse.transactionData.build();
-        const rebuiltTx = new TransactionBuilder(facilitatorAccount, {
-          fee: BASE_FEE,
-          networkPassphrase: NETWORK_PASSPHRASE,
-          sorobanData,
-        })
-          .setTimeout(60)
-          .addOperation(Operation.invokeHostFunction(operation))
-          .build();
+        // Fee-bump, not a rebuild with the facilitator as source — same
+        // auth-preservation fix and reasoning as openChannel's identical
+        // comment. initiate_close's caller.require_auth() needs the
+        // caller's own source_account-credentialed entry intact.
+        const feeBump = TransactionBuilder.buildFeeBumpTransaction(signer.address, BASE_FEE, transaction, NETWORK_PASSPHRASE);
 
-        const { signedTxXdr, error: signError } = await signer.signTransaction(rebuiltTx.toXDR(), {
+        const { signedTxXdr, error: signError } = await signer.signTransaction(feeBump.toXDR(), {
           networkPassphrase: NETWORK_PASSPHRASE,
         });
         if (signError || !signedTxXdr) {
@@ -537,11 +541,18 @@ export class ChannelService {
         if (!rpc.Api.isSimulationSuccess(sim)) {
           return { success: false, errorReason: `${logLabel}_simulation_failed` };
         }
-        const sorobanData = sim.transactionData.build();
-        const prepared = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK_PASSPHRASE, sorobanData })
-          .setTimeout(60)
-          .addOperation(contract.call(functionName, ...args))
-          .build();
+        // rpc.assembleTransaction, not a manual rebuild off `sorobanData`
+        // alone: rebuilding the operation from scratch via contract.call()
+        // (as this used to) silently drops the simulation's `auth` entries
+        // — invisible for checkpoint()/finalize_close() (fully
+        // permissionless, nothing to drop), but a real, previously-
+        // unverified bug for any auth-requiring call through this helper
+        // (initiateCloseAsDelegate's initiate_close, caller.require_auth()),
+        // which would otherwise submit fine and then trap on-chain with an
+        // empty-auth error. assembleTransaction keeps `tx`'s own already-
+        // simulated-against sequence number and operation, so no second
+        // rebuild off `account` is needed either.
+        const prepared = rpc.assembleTransaction(tx, sim).build();
 
         const { signedTxXdr, error: signError } = await signer.signTransaction(prepared.toXDR(), {
           networkPassphrase: NETWORK_PASSPHRASE,
