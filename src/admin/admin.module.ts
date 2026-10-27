@@ -4,6 +4,8 @@ import { AuthModule } from '../auth/auth.module';
 import { WithdrawalsModule } from '../withdrawals/withdrawals.module';
 import { FacilitatorModule } from '../facilitator/facilitator.module';
 import { AdminController } from './admin.controller';
+import { AdminTreasurySettlementsController } from './admin-treasury-settlements.controller';
+import { AdminTreasurySettlementsService } from './admin-treasury-settlements.service';
 import { AdminMerchantsService } from './admin-merchants.service';
 import { AdminActionsService } from './admin-actions.service';
 import { AdminStatsService } from './admin-stats.service';
@@ -27,8 +29,9 @@ import { AdminTeamService } from './admin-team.service';
 
 @Module({
   imports: [AdminAuthModule, AuthModule, WithdrawalsModule, FacilitatorModule],
-  controllers: [AdminController],
+  controllers: [AdminController, AdminTreasurySettlementsController],
   providers: [
+    AdminTreasurySettlementsService,
     AdminMerchantsService,
     AdminActionsService,
     AdminStatsService,
