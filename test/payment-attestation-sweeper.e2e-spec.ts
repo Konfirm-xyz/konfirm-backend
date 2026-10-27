@@ -258,7 +258,10 @@ describe('PaymentAttestationSweeperService (integration, real Postgres)', () => 
     // call sees it as taken and returns without doing any work.
     const lockClient = await pool.connect();
     try {
-      await lockClient.query('SELECT pg_advisory_lock(402003)');
+      // 402004, not 402003: ATTESTATION_LOCK_KEY moved to 402004 when
+      // FeeCollectionSweepService claimed 402003 (see payment-attestation-
+      // sweeper.service.ts) — this literal just never got updated to match.
+      await lockClient.query('SELECT pg_advisory_lock(402004)');
 
       await seedPayment(`sweep-lock-guard-${stamp}`);
       await sweeper.sweep();
@@ -266,7 +269,7 @@ describe('PaymentAttestationSweeperService (integration, real Postgres)', () => 
       // The lock was taken; no attest() should have been called.
       expect(attestMock).not.toHaveBeenCalled();
     } finally {
-      await lockClient.query('SELECT pg_advisory_unlock(402003)');
+      await lockClient.query('SELECT pg_advisory_unlock(402004)');
       lockClient.release();
     }
   });

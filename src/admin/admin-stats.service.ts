@@ -44,7 +44,10 @@ export class AdminStatsService {
       pool.query(`SELECT COUNT(*)::int AS count FROM withdrawal_attempts WHERE last_status IS NULL OR last_status != ALL($1)`, [
         TERMINAL_WITHDRAWAL_STATUSES,
       ]),
-      pool.query(`SELECT halted_at, halt_reason FROM facilitator_state WHERE id = 1`),
+      // facilitator_state is a generic key/value store (see
+      // FacilitatorSpendGuardService's HALT_KEY/HALT_REASON_KEY) — there is
+      // no single row with id=1 or halted_at/halt_reason columns.
+      pool.query(`SELECT key, value FROM facilitator_state WHERE key IN ('halted_at', 'halt_reason')`),
     ]);
 
     const byStatus: Record<string, number> = {};
@@ -68,7 +71,8 @@ export class AdminStatsService {
       reconcilerUpdatedAt === null ||
       Date.now() - new Date(reconcilerUpdatedAt).getTime() > RECONCILER_STALE_AFTER_MINUTES * 60 * 1000;
 
-    const facilitatorRow = facilitatorState.rows[0];
+    const facilitatorByKey: Record<string, string> = {};
+    for (const row of facilitatorState.rows) facilitatorByKey[row.key] = row.value;
 
     return {
       merchants: {
@@ -92,8 +96,8 @@ export class AdminStatsService {
       },
       withdrawals: { open_count: openWithdrawals.rows[0].count },
       facilitator: {
-        halted_at: facilitatorRow?.halted_at ?? null,
-        halt_reason: facilitatorRow?.halt_reason ?? null,
+        halted_at: facilitatorByKey.halted_at ?? null,
+        halt_reason: facilitatorByKey.halt_reason ?? null,
       },
     };
   }

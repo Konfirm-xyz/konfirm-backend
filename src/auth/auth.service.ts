@@ -162,7 +162,19 @@ export class AuthService {
     // best-effort and logged rather than thrown.
     try {
       const verifyToken = await this.createEmailVerificationToken(merchant.id);
-      await this.mailer.sendEmailVerification(merchant.email, verifyToken);
+      const appUrl = process.env.APP_URL ?? 'http://localhost:3000';
+      if (process.env.NODE_ENV === 'production' && !process.env.APP_URL) {
+        throw new Error('APP_URL must be set in production to build verification links');
+      }
+      // Mailer only exposes send() (see mail/mailer.ts) — same pattern as
+      // requestPasswordReset() below, not a dedicated method per mail kind.
+      await this.mailer.send({
+        to: merchant.email,
+        subject: 'Confirm your Konfirm account',
+        text:
+          `Use this link to confirm your email address:\n\n${appUrl}/verify-email?token=${verifyToken}\n\n` +
+          `The link expires in ${VERIFY_TTL_MINUTES / 60} hours and works once.`,
+      });
     } catch (err) {
       this.logger.error(`failed to send verification email for merchant ${merchant.id}: ${(err as Error).message}`);
     }
@@ -172,14 +184,15 @@ export class AuthService {
 
   // Mirrors the password-reset token pattern (migration 021): a random
   // opaque token is emailed, only its SHA-256 hash is stored, and it is
-  // single-use with a TTL. Reuses the account_recovery_tokens table shape.
+  // single-use with a TTL. Dedicated table (migration 032) — see that
+  // migration's comment for why this isn't the password_reset_tokens table.
   private async createEmailVerificationToken(merchantId: string): Promise<string> {
     const token = randomBytes(32).toString('hex');
     const tokenHash = sha256(token);
     const expiresAt = new Date(Date.now() + VERIFY_TTL_MINUTES * 60 * 1000);
     await pool.query(
-      `INSERT INTO account_recovery_tokens (merchant_id, token_hash, purpose, expires_at)
-       VALUES ($1, $2, 'email_verification', $3)`,
+      `INSERT INTO email_verification_tokens (merchant_id, token_hash, expires_at)
+       VALUES ($1, $2, $3)`,
       [merchantId, tokenHash, expiresAt],
     );
     return token;
@@ -193,8 +206,8 @@ export class AuthService {
     const tokenHash = sha256(token);
     const { rows } = await pool.query(
       `SELECT id, merchant_id, expires_at, used_at
-         FROM account_recovery_tokens
-        WHERE token_hash = $1 AND purpose = 'email_verification'`,
+         FROM email_verification_tokens
+        WHERE token_hash = $1`,
       [tokenHash],
     );
     const row = rows[0];
@@ -204,7 +217,7 @@ export class AuthService {
       throw new BadRequestException('verification token expired');
     }
 
-    await pool.query('UPDATE account_recovery_tokens SET used_at = now() WHERE id = $1', [row.id]);
+    await pool.query('UPDATE email_verification_tokens SET used_at = now() WHERE id = $1', [row.id]);
     await pool.query(
       `UPDATE merchants SET status = 'active' WHERE id = $1 AND status = 'pending'`,
       [row.merchant_id],
@@ -267,12 +280,15 @@ export class AuthService {
     return { token: this.issueToken(merchant, row.session_version), merchant };
   }
 
-  // Sends a reset link if the email belongs to an active account. Callers
-  // must return the same response either way: this method says nothing to
-  // the caller about whether an account exists.
+  // Sends a reset link unless the account is suspended. Callers must return
+  // the same response either way: this method says nothing to the caller
+  // about whether an account exists. Not restricted to status = 'active':
+  // a 'pending' (not yet email-verified) merchant can still log in (see
+  // login()'s own suspended-only check) and must be able to reset a
+  // forgotten password too, same as login — only 'suspended' is excluded.
   async requestPasswordReset(rawEmail: string): Promise<void> {
     const email = normalizeEmail(rawEmail);
-    const { rows } = await pool.query(`SELECT id FROM merchants WHERE email = $1 AND status = 'active'`, [email]);
+    const { rows } = await pool.query(`SELECT id FROM merchants WHERE email = $1 AND status != 'suspended'`, [email]);
     if (rows.length === 0) return;
     const merchantId = rows[0].id;
 

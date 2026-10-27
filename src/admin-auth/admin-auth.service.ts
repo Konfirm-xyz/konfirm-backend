@@ -50,6 +50,10 @@ export class AdminAuthService {
     // wrong, same reasoning as auth.service.ts.
     const invalid = () => new UnauthorizedException('invalid email or password');
     if (rows.length === 0) {
+      // Same bcrypt cost as a real row's compare below, so a login for an
+      // unknown email takes as long as one for a wrong password — see
+      // DUMMY_ADMIN_PASSWORD_HASH above.
+      await bcrypt.compare(password, DUMMY_ADMIN_PASSWORD_HASH);
       adminLoginAttempts.recordFailure(account);
       throw invalid();
     }

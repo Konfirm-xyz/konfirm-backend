@@ -4,12 +4,13 @@ import { FeesController } from './fees.controller';
 import { FeesService } from './fees.service';
 import { FeesSweeperService } from './fees-sweeper.service';
 import { AdminFeesController } from '../admin/admin-fees.controller';
+import { AdminFeesService } from '../admin/admin-fees.service';
 import { AdminAuthModule } from '../admin-auth/admin-auth.module';
 
 @Module({
   imports: [AuthModule, AdminAuthModule],
   controllers: [FeesController, AdminFeesController],
-  providers: [FeesService, FeesSweeperService],
+  providers: [FeesService, FeesSweeperService, AdminFeesService],
   exports: [FeesService],
 })
 export class FeesModule {}

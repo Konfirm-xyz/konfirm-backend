@@ -1,7 +1,7 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { pool } from '../db/pool';
-import { Mailer } from '../mail/mailer';
+import { MAILER, Mailer } from '../mail/mailer';
 
 // ---------------------------------------------------------------------------
 // Referral reward constants
@@ -61,23 +61,28 @@ const BASE_REWARD_DIVISOR_OFFSET = 2; // divisor = reward_count + BASE_REWARD_DI
 // both grant a 6th reward to the same referrer.
 const MAX_REFERRAL_REWARDS_PER_REFERRER = 5;
 
-// Claw-back decision (issue #57):
+// Claw-back status (issue #57) — INCOMPLETE, do not assume this works:
 //
 // A reward is granted once a referred merchant has a qualifying `paid`
-// payment, and `reward_granted_at` is treated as final.  If that payment is
-// later flipped to `disputed`/`refunded` by an admin, the referrer keeps the
-// reward.  We deliberately accept this as a known, low-severity risk rather
-// than implementing a reversal path:
-//   - The reward is a bounded fee discount (≤ $500 volume, ≤ 30 days per
-//     reward, ≤ 5 rewards per referrer), not a cash payout — the financial
-//     exposure per claw-back is small.
-//   - Disputes/refunds on referral-originated payments are expected to be
-//     rare at current volume.
-//   - A reversal path would need to un-stack promo_expires_at and decrement
-//     referrer_reward_count without double-revoking under concurrent sweeps,
-//     which is materially more complex than the reward is worth today.
-// If dispute volume or reward value grows, revisit this: the sweep below is
-// the single place a re-validation pass would hook in.
+// payment, and `reward_granted_at` (on `referrals`) is treated as final by
+// the sweep below. Migration 025 added `reward_qualifying_payment_id`,
+// `reward_granted_at`, and `reward_revoked_at` on `merchants`, plus a partial
+// index, clearly intending a reversal sweep for when that payment later
+// flips to `disputed`/`refunded` — but:
+//   - This service never populates `merchants.reward_qualifying_payment_id`
+//     or `merchants.reward_granted_at`, so the index above has nothing to
+//     match against.
+//   - `AdminPaymentsService.updateStatus()`'s claw-back attempt queries a
+//     `referral_rewards` table that does not exist in any migration (likely
+//     meant to update `merchants` using the columns migration 025 actually
+//     created) — that query will fail at runtime the first time a payment
+//     is disputed/refunded, not at compile time (it's a raw SQL string).
+// Until someone wires the merchant-side columns from this sweep and fixes
+// the admin-side table reference, a referrer keeps their reward even after
+// the qualifying payment is reversed. Flagged, not fixed, here — fixing it
+// means deciding how `merchants.reward_qualifying_payment_id` should behave
+// when a referrer earns multiple stacked rewards (the column is singular),
+// which is a product decision, not a mechanical restoration.
 
 // Triggers only on the referred merchant's real activation (a genuine paid
 // payment above MIN_REFERRAL_QUALIFYING_AMOUNT_USDC), never on mere signup
@@ -91,7 +96,7 @@ const MAX_REFERRAL_REWARDS_PER_REFERRER = 5;
 export class ReferralRewardsService {
   private readonly logger = new Logger(ReferralRewardsService.name);
 
-  constructor(private readonly mailer: Mailer) {}
+  constructor(@Inject(MAILER) private readonly mailer: Mailer) {}
 
   @Cron('*/5 * * * *')
   async sweep(): Promise<void> {
@@ -196,14 +201,26 @@ export class ReferralRewardsService {
     //     its current expiry (stacking), not from NOW() (which would shorten
     //     the total window).
     //   - If the promo has already lapsed, the new reward starts from NOW().
-    await pool.query(
+    const { rows: promoRows } = await pool.query<{ promo_fee_bps: number; promo_expires_at: Date }>(
       `UPDATE merchants
-       SET promo_fee_bps     = $2,
-           promo_expires_at = GREATEST(NOW(), COALESCE(promo_expires_at, NOW()))
-                              + ($3 || ' days')::interval
-       WHERE id = $1`,
-      [referrerId, newPromoFeeBps, REWARD_DAYS],
+       SET promo_fee_bps         = $2,
+           promo_expires_at      = GREATEST(NOW(), COALESCE(promo_expires_at, NOW()))
+                                   + ($3 || ' days')::interval,
+           promo_volume_cap_usdc = $4
+       WHERE id = $1
+         AND NOT (
+           promo_expires_at > NOW()
+           AND promo_fee_bps IS NOT NULL
+           AND (
+             promo_fee_bps < $2
+             OR (promo_fee_bps = $2 AND (promo_volume_cap_usdc IS NULL OR promo_volume_cap_usdc >= $4))
+           )
+         )
+       RETURNING promo_fee_bps, promo_expires_at`,
+      [referrerId, newPromoFeeBps, REWARD_DAYS, REWARD_VOLUME_CAP_USDC],
     );
+
+    const newExpiresAt = promoRows[0]?.promo_expires_at ?? null;
 
     if (promoRows.length === 0) {
       this.logger.log(`kept the more favorable active promo for merchant ${referrerId}`);

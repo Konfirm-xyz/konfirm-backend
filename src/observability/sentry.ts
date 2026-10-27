@@ -1,5 +1,9 @@
 import * as Sentry from '@sentry/node';
-import type { Event } from '@sentry/node';
+import type { ErrorEvent } from '@sentry/node';
+
+// Mirrors @sentry/core's `Context` type (not re-exported by @sentry/node):
+// a single named context entry on an event, e.g. event.contexts.response.
+type Context = Record<string, unknown>;
 
 // Keys that are safe/standard on a serialized Error and should survive the
 // scrubber. Anything else attached to an Error's own enumerable properties
@@ -31,17 +35,17 @@ function scrubRecord(
 // Defense-in-depth: strip unknown/non-standard keys from the event's extra and
 // contexts so a future `Object.assign(err, { body })` on a path reaching the
 // global exception filter can't leak unredacted data to Sentry.
-export function scrubEvent(event: Event): Event {
+export function scrubEvent(event: ErrorEvent): ErrorEvent {
   if (event.extra) {
     event.extra = scrubRecord(event.extra);
   }
   if (event.contexts) {
-    const contexts: Record<string, unknown> = {};
+    const contexts: Record<string, Context | undefined> = {};
     for (const [name, value] of Object.entries(event.contexts)) {
       if (value && typeof value === 'object') {
         contexts[name] = scrubRecord(value as Record<string, unknown>);
       } else {
-        contexts[name] = value;
+        contexts[name] = value as Context | undefined;
       }
     }
     event.contexts = contexts;

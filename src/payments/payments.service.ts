@@ -67,8 +67,10 @@ export class PaymentsService {
     }
     // A suspended merchant's links stop accepting payment immediately — the
     // real teeth of a suspension, not just locking them out of their own
-    // dashboard (see auth.guard.ts).
-    if (link.merchant_status !== 'active') {
+    // dashboard (see auth.guard.ts). Not restricted to merchant_status =
+    // 'active': a 'pending' (not yet email-verified) merchant can still log
+    // in and accept payments — only 'suspended' blocks checkout.
+    if (link.merchant_status === 'suspended') {
       throw new BadRequestException('this merchant is not currently accepting payments');
     }
     return link;

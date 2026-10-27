@@ -36,18 +36,28 @@ export class AdminPaymentsService {
     if (rows.length === 0) throw new NotFoundException('payment not found');
     const { previous_status: previous, ...payment } = rows[0];
 
-    // Referral reward claw-back (issue #57): a referral reward is granted once a
-    // qualifying payment reaches 'paid'. If that payment is later moved to a
-    // non-qualifying status ('disputed'/'refunded'), revoke the reward so the
-    // referrer does not keep it. Idempotent: only rows still granted are revoked.
+    // Referral reward claw-back (issue #57): intended to revoke a
+    // referrer's reward if the qualifying payment is later moved to a
+    // non-qualifying status ('disputed'/'refunded'). This originally
+    // targeted a `referral_rewards` table that does not exist anywhere in
+    // this schema (a runtime 500 on every non-'paid' status change, not
+    // caught by `npm run build` since it's a raw SQL string) — retargeted
+    // to the real columns migration 025 added on `merchants`
+    // (reward_qualifying_payment_id/reward_granted_at/reward_revoked_at).
+    // Still effectively a no-op today: see referral-rewards.service.ts's
+    // "Claw-back status" comment — nothing in this codebase ever sets
+    // merchants.reward_qualifying_payment_id, so this WHERE clause has
+    // nothing to match yet. Fixed here only enough to stop the 500;
+    // actually wiring up the grant side is a product decision flagged
+    // there, not guessed at here.
     if (status !== 'paid') {
       await pool.query(
-        `UPDATE referral_rewards r
-         SET reward_granted_at = NULL, revoked_at = now(), revoked_reason = $2
-         WHERE r.qualifying_payment_id = $1
-           AND r.reward_granted_at IS NOT NULL
-           AND r.revoked_at IS NULL`,
-        [id, `qualifying payment set to ${status}`],
+        `UPDATE merchants m
+         SET reward_granted_at = NULL, reward_revoked_at = now()
+         WHERE m.reward_qualifying_payment_id = $1
+           AND m.reward_granted_at IS NOT NULL
+           AND m.reward_revoked_at IS NULL`,
+        [id],
       );
     }
 

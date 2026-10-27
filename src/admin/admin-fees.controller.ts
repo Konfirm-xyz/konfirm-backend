@@ -24,10 +24,11 @@ export class AdminFeesController {
   @ApiResponse({ status: 200, description: 'Array of { merchant_id, name, email, status, asset_code, amount, payments, oldest_owed_at, has_disputed_settlement }.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
   async owed(@Query('limit') limit?: string, @Query('offset') offset?: string) {
-    return this.feesService.listOwed({
+    const { data } = await this.feesService.getOwedFees({
       limit: limit !== undefined ? Number(limit) : undefined,
       offset: offset !== undefined ? Number(offset) : undefined,
     });
+    return data;
   }
 
   @Get('disputed')

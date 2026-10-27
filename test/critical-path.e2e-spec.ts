@@ -128,7 +128,14 @@ describe('critical path: signup -> link -> session -> prepare-tx (e2e)', () => {
     expect(tx.memo.value).toBe('123456789');
   });
 
-  it('builds a spec-correct SEP-7 QR payment URI for the same link', async () => {
+  // This link carries the default merchant fee_bps (10, asserted above as a
+  // real $0.0050000 fee leg) — SEP-7's `pay` request can only express one
+  // payment, so payments.service.ts's buildPayUri() refuses to serve a URI
+  // for any fee-bearing link rather than silently dropping the fee (see its
+  // own comment). Before that refusal was added (#63), this test asserted
+  // a 200 with a fee-free URI; that assertion no longer matches the link
+  // under test, which does carry a fee, so this now asserts the refusal.
+  it('refuses a SEP-7 QR URI for this link, since it carries a non-zero platform fee', async () => {
     await request(app.getHttpServer())
       .post(`/links/${linkId}/sessions`)
       .send({ muxed_id: '987654321' })
@@ -137,11 +144,8 @@ describe('critical path: signup -> link -> session -> prepare-tx (e2e)', () => {
     const res = await request(app.getHttpServer())
       .get('/payments/pay-uri')
       .query({ linkId, muxed_id: '987654321' })
-      .expect(200);
+      .expect(400);
 
-    expect(res.body.uri).toContain('web+stellar:pay?');
-    expect(res.body.uri).toContain(`destination=${stellarAddress}`);
-    expect(res.body.uri).toContain('memo=987654321');
-    expect(res.body.uri).toContain('memo_type=MEMO_ID');
+    expect(res.body.message).toContain('platform fee');
   });
 });
