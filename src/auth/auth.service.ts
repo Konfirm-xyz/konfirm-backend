@@ -184,7 +184,7 @@ export class AuthService {
 
   // Mirrors the password-reset token pattern (migration 021): a random
   // opaque token is emailed, only its SHA-256 hash is stored, and it is
-  // single-use with a TTL. Dedicated table (migration 029) — see that
+  // single-use with a TTL. Dedicated table (migration 032) — see that
   // migration's comment for why this isn't the password_reset_tokens table.
   private async createEmailVerificationToken(merchantId: string): Promise<string> {
     const token = randomBytes(32).toString('hex');
