@@ -1,3 +1,4 @@
+import { Keypair } from '@stellar/stellar-sdk';
 import { pool } from '../db/pool';
 import { ChannelKeeperService, classifyKeeperFailure, keeperBackoffMs } from './channel-keeper.service';
 import type { ChannelService, FacilitatorCallResult } from './channel.service';
@@ -109,10 +110,6 @@ describe('ChannelKeeperService failure handling', () => {
     await pool.query('DELETE FROM x402_channels WHERE onchain_channel_id IN ($1, $2)', [terminalId, transientId]);
   });
 
-  afterAll(async () => {
-    await pool.end();
-  });
-
   it('handles a terminal and a transient failure differently, and backs both off', async () => {
     outcomes.set(String(terminalId), { success: false, errorReason: 'checkpoint_simulation_failed' });
     outcomes.set(String(transientId), { success: false, errorReason: 'checkpoint_confirmation_timeout' });
@@ -180,4 +177,64 @@ describe('ChannelKeeperService failure handling', () => {
     expect(state.keeper_last_error_kind).toBeNull();
     expect(state.next_attempt_in_secs).toBeNull();
   });
+});
+
+// Covers sweepIdleClose(), added for PRD docs/PRD.md M2: the previous
+// comment block here said idle-close could never be implemented without a
+// contract change (the facilitator is neither channel party, so it had no
+// authority to call initiate_close). The redeployed channel contract now
+// accepts a delegated_closer, so this proves the keeper actually uses it —
+// closing a channel delegated to it, and leaving a non-delegated one alone
+// for logIdleChannels() to merely report.
+describe('ChannelKeeperService.sweepIdleClose()', () => {
+  const facilitatorAddress = Keypair.fromSecret(process.env.FACILITATOR_SECRET_KEY as string).publicKey();
+  const delegatedId = 9_200_000_000 + (Date.now() % 1_000_000);
+  const notDelegatedId = delegatedId + 1;
+  const initiateCloseCalls: string[] = [];
+  const fakeChannel = {
+    initiateCloseAsDelegate: async (onchainChannelId: bigint) => {
+      initiateCloseCalls.push(onchainChannelId.toString());
+      return { success: true };
+    },
+    checkpointChannel: async () => ({ success: true }),
+    finalizeCloseChannel: async () => ({ success: true }),
+    getChannelInfoOnChain: async () => {
+      throw new Error('no RPC in tests');
+    },
+  } as unknown as ChannelService;
+  const keeper = new ChannelKeeperService(fakeChannel);
+
+  async function insertIdleChannel(onchainId: number, delegatedCloser: string | null): Promise<void> {
+    await pool.query(
+      `INSERT INTO x402_channels
+         (onchain_channel_id, payer_address, payee_address, asset_contract, payer_pubkey, deposited,
+          delegated_closer, last_activity_at)
+       VALUES ($1, 'GPAYER', 'GPAYEE', 'CASSET', 'ab', 1000, $2, NOW() - INTERVAL '169 hours')`,
+      [onchainId, delegatedCloser],
+    );
+  }
+
+  beforeEach(async () => {
+    initiateCloseCalls.length = 0;
+    await insertIdleChannel(delegatedId, facilitatorAddress);
+    await insertIdleChannel(notDelegatedId, null);
+  });
+
+  afterEach(async () => {
+    await pool.query('DELETE FROM x402_channels WHERE onchain_channel_id IN ($1, $2)', [delegatedId, notDelegatedId]);
+  });
+
+  it('closes an idle channel delegated to this facilitator, and leaves a non-delegated one alone', async () => {
+    await keeper.sweep();
+
+    expect(initiateCloseCalls).toEqual([String(delegatedId)]);
+    expect(initiateCloseCalls).not.toContain(String(notDelegatedId));
+  });
+});
+
+// File-level, not per-describe: the pool is a shared module singleton, so
+// closing it inside any one describe block above would break whichever one
+// runs after it.
+afterAll(async () => {
+  await pool.end();
 });

@@ -14,18 +14,22 @@ Four identities matter. Keep them separate.
 - The facilitator never falls back to the deployer key in production. Production needs `FACILITATOR_KMS_KEY_ID` or `FACILITATOR_SECRET_KEY`, or it throws on the first signing attempt.
 - At boot, `assertSeparateHotKeys()` refuses to start if the deployer, facilitator, and fee secrets resolve to the same account (`src/common/facilitator-signer.ts`).
 
-## What the code cannot fix: the deployer is the contract admin
+## Admin rotation (updated 2026-10-25 — route 2 below has shipped)
 
-The contracts have no admin rotation. `compliance`, `payment`, and `channel` take the admin address once, in `initialize`, and no function changes it. Two routes:
+`compliance`, `payment`, and `channel` each export `set_admin(current_admin, new_admin)` as of the M1 redeploy (`konfirm-contracts` commit `851fa1a`, see that repo's `README.md` for the live addresses) — confirmed present on all three via `stellar contract info interface --network testnet`. It requires **both** `current_admin.require_auth()` and `new_admin.require_auth()`, a two-party handshake: a leaked admin key alone cannot install a new admin the real admin never consented to, and the new admin can't be set without that new admin's own key actually signing. `treasury` has no `set_admin` — it has no single admin role to rotate; its 2-of-3 signer set governs settlements directly, and there's no `set_admin`-equivalent for replacing a signer today (a real gap, not yet closed — see below).
+
+Nothing in this backend calls `set_admin` yet — it exists on-chain, unused. Rotating today means a manual `stellar contract invoke ... -- set_admin --current_admin <old> --new_admin <new>` for each of the three contracts, signed by both keys. Building this into the admin UI (alongside the treasury settlement tooling, PRD `docs/PRD.md` M2) is still open — not done in this pass.
+
+The multisig-deployer route below is still a valid alternative/complement for any contract (including `treasury`, which has no `set_admin` route at all) — it works without touching contract code, by moving multi-signature enforcement onto the Stellar *account* itself rather than the contract's own storage.
 
 1. **No redeploy: make the deployer account a multisig.** Stellar accounts can require several signatures. Set the deployer account's master weight to 0, add three signers (for example, three team members' hardware keys), and set the medium and high thresholds to 2. The admin `require_auth` then needs two signatures, not one leaked key. This works on the existing contracts. Do it with `stellar` CLI or Stellar Laboratory, using the current deployer key, before anything else. Then remove `STELLAR_DEPLOYER_SECRET_KEY` from the production environment entirely.
-2. **Redeploy with an admin-rotation function.** Add `set_admin` to each contract, deploy new instances, and update the addresses in `konfirm-contracts/README.md`, `konfirm-backend`'s compliance client, and the reconciler. This is the cleaner long-term answer and costs a redeploy.
+2. **`set_admin` (shipped for compliance/payment/channel).** Call it directly — no redeploy needed now that it's live. Still manual (no backend/UI call path) and still needs both the current and new admin's signatures in hand.
 
 ## Checklist, in order
 
 1. Create the facilitator key in KMS (or generate a dedicated Stellar key), fund it, and set `FACILITATOR_KMS_KEY_ID` or `FACILITATOR_SECRET_KEY` in production.
 2. Create or confirm a separate fee-account key. Set `PLATFORM_FEE_SECRET_KEY`.
-3. Move the deployer account to a multisig (route 1 above), or plan the redeploy (route 2).
+3. Move the deployer account to a multisig (route 1 above), or rotate via `set_admin` (route 2, already live — no redeploy needed).
 4. Remove `STELLAR_DEPLOYER_SECRET_KEY` from production. Confirm the service boots and signs a settlement.
 5. Confirm `FACILITATOR_DAILY_SPEND_CAP_USDC` is set to a sensible value.
 
