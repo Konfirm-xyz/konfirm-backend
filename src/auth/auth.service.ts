@@ -280,12 +280,15 @@ export class AuthService {
     return { token: this.issueToken(merchant, row.session_version), merchant };
   }
 
-  // Sends a reset link if the email belongs to an active account. Callers
-  // must return the same response either way: this method says nothing to
-  // the caller about whether an account exists.
+  // Sends a reset link unless the account is suspended. Callers must return
+  // the same response either way: this method says nothing to the caller
+  // about whether an account exists. Not restricted to status = 'active':
+  // a 'pending' (not yet email-verified) merchant can still log in (see
+  // login()'s own suspended-only check) and must be able to reset a
+  // forgotten password too, same as login — only 'suspended' is excluded.
   async requestPasswordReset(rawEmail: string): Promise<void> {
     const email = normalizeEmail(rawEmail);
-    const { rows } = await pool.query(`SELECT id FROM merchants WHERE email = $1 AND status = 'active'`, [email]);
+    const { rows } = await pool.query(`SELECT id FROM merchants WHERE email = $1 AND status != 'suspended'`, [email]);
     if (rows.length === 0) return;
     const merchantId = rows[0].id;
 

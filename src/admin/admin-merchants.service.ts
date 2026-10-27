@@ -14,14 +14,16 @@ export class AdminMerchantsService {
     return rows;
   }
 
-  // Returns the address a reset should go to, but only for an active
-  // account: a suspended merchant can't use a reset link anyway, and sending
-  // one would just be confusing mail.
+  // Returns the address a reset should go to, unless the account is
+  // suspended: a suspended merchant can't use a reset link anyway, and
+  // sending one would just be confusing mail. Not restricted to status =
+  // 'active' — a 'pending' (not yet email-verified) merchant can still log
+  // in and still needs to be able to reset a forgotten password.
   async emailForPasswordReset(id: string): Promise<string> {
     const { rows } = await pool.query('SELECT email, status FROM merchants WHERE id = $1', [id]);
     if (rows.length === 0) throw new NotFoundException('merchant not found');
-    if (rows[0].status !== 'active') {
-      throw new ConflictException('merchant is not active — reactivate the account before sending a reset');
+    if (rows[0].status === 'suspended') {
+      throw new ConflictException('merchant is suspended — reactivate the account before sending a reset');
     }
     return rows[0].email;
   }

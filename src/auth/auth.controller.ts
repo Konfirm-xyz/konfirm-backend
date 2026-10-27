@@ -117,6 +117,50 @@ export class AuthController {
     return { merchant };
   }
 
+  @Post('login')
+  @HttpCode(200)
+  @Throttle(AUTH_THROTTLE)
+  @ApiOperation({
+    summary: 'Log in as a merchant',
+    description:
+      'Returns a session cookie on success. Intentionally uses the same error ' +
+      'for wrong email and wrong password to prevent account enumeration.',
+  })
+  @ApiBody(zodBody(loginSchema, 'Login request'))
+  @ApiResponse({ status: 200, description: 'Login successful; merchant object returned. konfirm_session cookie set.' })
+  @ApiResponse({ status: 401, description: 'Invalid credentials (same response for wrong email or wrong password).' })
+  async login(
+    @Body(new ZodValidationPipe(loginSchema)) body: z.infer<typeof loginSchema>,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const { token, merchant } = await this.auth.login(body.email, body.password);
+    this.setSessionCookie(res, token);
+    return { merchant };
+  }
+
+  // Always the same response, whether or not the email has an account. A
+  // mail failure is logged server-side and not shown to the caller, because
+  // showing it would tell an attacker the address was real.
+  @Post('forgot-password')
+  @HttpCode(200)
+  @Throttle(FORGOT_THROTTLE)
+  @ApiOperation({
+    summary: 'Request a password-reset email',
+    description:
+      'Always returns `{ ok: true }` regardless of whether the email exists — ' +
+      'prevents enumeration. Rate-limited to 5 req/min per IP.',
+  })
+  @ApiBody(zodBody(forgotPasswordSchema, 'Forgot password request'))
+  @ApiResponse({ status: 200, description: 'Always returns { ok: true }.' })
+  async forgotPassword(@Body(new ZodValidationPipe(forgotPasswordSchema)) body: z.infer<typeof forgotPasswordSchema>) {
+    try {
+      await this.auth.requestPasswordReset(body.email);
+    } catch (err) {
+      this.logger.error(`password reset email failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return { ok: true };
+  }
+
   @Post('reset-password')
   @HttpCode(200)
   @Throttle(AUTH_THROTTLE)
