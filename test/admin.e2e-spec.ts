@@ -84,6 +84,16 @@ describe('admin workflow: suspend/reactivate a merchant (e2e)', () => {
 
     // Attempting to use the old cookie should now fail
     await request(app.getHttpServer()).get('/admin/auth/me').set('Cookie', adminCookie).expect(401);
+
+    // Every test after this one in this file reuses the shared adminCookie
+    // variable, so logging out here must not leave it permanently dead for
+    // the rest of the suite (#96 added this logout test but never restored
+    // a working session afterward).
+    const relogin = await request(app.getHttpServer())
+      .post('/admin/auth/login')
+      .send({ email: adminEmail, password: 'an-admin-password-000' })
+      .expect(200);
+    adminCookie = relogin.headers['set-cookie'][0].split(';')[0];
   });
 
   it('POST /admin/auth/logout without a cookie is a no-op', async () => {
@@ -391,7 +401,16 @@ describe('admin workflow: suspend/reactivate a merchant (e2e)', () => {
     const referredEmail = `referred-e2e-${Date.now()}@example.com`;
     const protectedReferredEmail = `protected-referred-e2e-${Date.now()}@example.com`;
     const noCodeEmail = `no-code-e2e-${Date.now()}@example.com`;
-    const stellarAddr = 'GBXBABMFZIJPTOFI6STUXA2FMEXDBB4URBD3VS5XDHKMFHGLJZ5WPQBB';
+    // Distinct per merchant, not one shared address: AuthService.signup()'s
+    // self-referral guard silently drops attribution when the referred
+    // merchant's stellar_base_address matches the referrer's (same address
+    // can't belong to two independent businesses) — a single shared
+    // constant here would make every "real referral code" case in this
+    // block look like self-referral and never attribute.
+    const referrerStellarAddr = 'GBXBABMFZIJPTOFI6STUXA2FMEXDBB4URBD3VS5XDHKMFHGLJZ5WPQBB';
+    const noCodeStellarAddr = 'GBXBABMFZIJPTOHI6STUXA2FMEXDBB4URBD3VS5XDHKMFHGLJZ5WPQBB';
+    const referredStellarAddr = 'GBXBABMFZIJPTOFI6STUXA2FMEXGBB4URBH3VS5XDHKMFHGLJZ5WPQBB';
+    const protectedReferredStellarAddr = 'GBXBABMFZIJPTOFI6STUXA2FMEXDBB4URBD3VS5XHHKMFHGQJZ5WPQHB';
     let referrerId: string;
     let referrerCode: string;
     let referrerCookie: string;
@@ -414,7 +433,7 @@ describe('admin workflow: suspend/reactivate a merchant (e2e)', () => {
     it('every new merchant gets a referral code automatically, no separate step', async () => {
       const res = await request(app.getHttpServer())
         .post('/auth/signup')
-        .send({ email: referrerEmail, password: 'a-real-password-000', name: 'Referrer', stellar_base_address: stellarAddr })
+        .send({ email: referrerEmail, password: 'a-real-password-000', name: 'Referrer', stellar_base_address: referrerStellarAddr })
         .expect(201);
       referrerId = res.body.merchant.id;
       referrerCookie = res.headers['set-cookie'][0].split(';')[0];
@@ -431,7 +450,7 @@ describe('admin workflow: suspend/reactivate a merchant (e2e)', () => {
           email: noCodeEmail,
           password: 'a-real-password-000',
           name: 'No Code',
-          stellar_base_address: stellarAddr,
+          stellar_base_address: noCodeStellarAddr,
           referral_code: 'NOTAREALCODE',
         })
         .expect(201);
@@ -450,7 +469,7 @@ describe('admin workflow: suspend/reactivate a merchant (e2e)', () => {
           email: referredEmail,
           password: 'a-real-password-000',
           name: 'Referred Merchant',
-          stellar_base_address: stellarAddr,
+          stellar_base_address: referredStellarAddr,
           referral_code: referrerCode,
         })
         .expect(201);
@@ -506,7 +525,13 @@ describe('admin workflow: suspend/reactivate a merchant (e2e)', () => {
       expect(adminRow.referrer_email).toBe(referrerEmail);
     });
 
-    it('the reward sweep grants the referrer a 50%-off, time-only promo exactly once', async () => {
+    // This test's title and its original NULL (uncapped) assertion below
+    // predate referral-rewards.service.ts's volume-cap hardening (#9,
+    // REWARD_VOLUME_CAP_USDC=500 — "one referral -> one trial's worth of
+    // savings, not infinite volume at a discount"), which deliberately
+    // replaced the old NULL/uncapped behavior. Updated here to match that
+    // later, intentional change rather than the stale pre-hardening value.
+    it('the reward sweep grants the referrer a 50%-off, volume-capped promo exactly once', async () => {
       const before = await pool.query('SELECT fee_bps FROM merchants WHERE id = $1', [referrerId]);
       const baseFeeBps: number = before.rows[0].fee_bps;
 
@@ -524,7 +549,7 @@ describe('admin workflow: suspend/reactivate a merchant (e2e)', () => {
         [referrerId],
       );
       expect(referrer.rows[0].promo_fee_bps).toBe(Math.floor(baseFeeBps / 2));
-      expect(referrer.rows[0].promo_volume_cap_usdc).toBeNull();
+      expect(Number(referrer.rows[0].promo_volume_cap_usdc)).toBe(500);
       const daysUntilExpiry = (new Date(referrer.rows[0].promo_expires_at).getTime() - Date.now()) / (24 * 60 * 60 * 1000);
       expect(daysUntilExpiry).toBeGreaterThan(29);
       expect(daysUntilExpiry).toBeLessThanOrEqual(30);
@@ -544,7 +569,7 @@ describe('admin workflow: suspend/reactivate a merchant (e2e)', () => {
           email: protectedReferredEmail,
           password: 'a-real-password-000',
           name: 'Protected Referred Merchant',
-          stellar_base_address: stellarAddr,
+          stellar_base_address: protectedReferredStellarAddr,
           referral_code: referrerCode,
         })
         .expect(201);

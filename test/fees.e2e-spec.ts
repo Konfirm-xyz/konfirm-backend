@@ -129,7 +129,7 @@ describe('fee settlement (e2e, testnet)', () => {
       expect.objectContaining({ asset_code: 'XLM', amount: '0.6000000' }),
     ]);
     const tx = TransactionBuilder.fromXDR(built.body.unsigned_xdr, Networks.TESTNET);
-    expect(tx.operations[0].amount).toBe('0.6000000');
+    expect((tx.operations[0] as any).amount).toBe('0.6000000');
     tx.sign(merchantKey);
     await request(app.getHttpServer())
       .post(`/fees/settlements/${built.body.settlement_id}/submit`)
