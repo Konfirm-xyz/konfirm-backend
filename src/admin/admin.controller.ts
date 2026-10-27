@@ -150,6 +150,31 @@ export class AdminController {
     return this.merchants.list(limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
   }
 
+  @Post('merchants/:id/password-reset')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Send a merchant a password-reset email',
+    description:
+      'Emails the merchant a reset link (same as self-service forgot-password). ' +
+      'Only for active accounts. Admin never sees or sets the password. Logged to admin_actions.',
+  })
+  @ApiParam({ name: 'id', description: 'Merchant UUID', type: 'string' })
+  @ApiBody(zodBody(passwordResetSchema, 'Password reset reason'))
+  @ApiResponse({ status: 200, description: 'Returns { ok: true }.' })
+  @ApiResponse({ status: 400, description: 'Merchant is not active.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
+  @ApiResponse({ status: 404, description: 'Merchant not found.' })
+  async sendMerchantPasswordReset(
+    @Param('id') id: string,
+    @Body(new ZodValidationPipe(passwordResetSchema)) body: z.infer<typeof passwordResetSchema>,
+    @Req() req: AuthedAdminRequest,
+  ) {
+    const email = await this.merchants.emailForPasswordReset(id);
+    await this.auth.requestPasswordReset(email);
+    await this.actions.log(req.admin.id, 'merchant.password-reset-sent', 'merchant', id, { reason: body.reason });
+    return { ok: true };
+  }
+
   @Patch('merchants/:id/status')
   @ApiOperation({
     summary: 'Set merchant status',
@@ -191,9 +216,10 @@ export class AdminController {
     @Body(new ZodValidationPipe(setMerchantTierSchema)) body: z.infer<typeof setMerchantTierSchema>,
     @Req() req: AuthedAdminRequest,
   ) {
-    const merchant = await this.merchants.setTier(id, body.risk_tier);
-    await this.actions.log(req.admin.id, 'merchant.tier', 'merchant', id, {
-      risk_tier: body.risk_tier,
+    const { merchant, previous } = await this.merchants.setTier(id, body.risk_tier);
+    await this.actions.log(req.admin.id, 'merchant.set-tier', 'merchant', id, {
+      previous,
+      new: body.risk_tier,
       reason: body.reason,
     });
     return merchant;
@@ -289,9 +315,10 @@ export class AdminController {
     @Body(new ZodValidationPipe(setPaymentStatusSchema)) body: z.infer<typeof setPaymentStatusSchema>,
     @Req() req: AuthedAdminRequest,
   ) {
-    const payment = await this.payments.setStatus(id, body.status);
-    await this.actions.log(req.admin.id, 'payment.status', 'payment', id, {
-      status: body.status,
+    const { payment, previous } = await this.payments.setStatus(id, body.status);
+    await this.actions.log(req.admin.id, `payment.set-status.${body.status}`, 'payment', id, {
+      previous,
+      new: body.status,
       reason: body.reason,
     });
     return payment;
@@ -389,6 +416,17 @@ export class AdminController {
     return { ok: true };
   }
 
+  @Get('reconciler/status')
+  @ApiOperation({
+    summary: 'Get reconciler cursor status',
+    description: 'Returns the reconciler\'s current Horizon paging cursor and when it last moved.',
+  })
+  @ApiResponse({ status: 200, description: 'Reconciler status with cursor and last_moved_at.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
+  getReconcilerStatus() {
+    return this.reconciler.status();
+  }
+
   // Backward-only, enforced in AdminReconcilerService — the exact "never
   // advance past unprocessed payments" rule from docs/RUNBOOK.md §4.
   @Post('reconciler/rewind')
@@ -415,7 +453,180 @@ export class AdminController {
     return result;
   }
 
-  @Patch('bazaar/listings/:id/status')
+  // --- Withdrawal attempts ---
+
+  @Get('withdrawal-attempts')
+  @ApiOperation({
+    summary: 'List merchant cash-out attempts',
+    description:
+      'Merchant cash-outs Konfirm has observed being started, with the anchor\'s last known status. ' +
+      'Admin-visibility only — Konfirm has no authority over the anchor\'s own transaction state.',
+  })
+  @ApiResponse({ status: 200, description: 'Array of withdrawal attempt records.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
+  listWithdrawalAttempts() {
+    return this.withdrawalAttempts.list();
+  }
+
+  // --- x402 settlements ---
+
+  @Get('x402-settlements')
+  @ApiOperation({ summary: 'List x402 single-shot settlements', description: 'x402 settlements with optional status filter and pagination.' })
+  @ApiQuery({ name: 'status', required: false, type: 'string', description: 'Filter by status' })
+  @ApiQuery({ name: 'limit', required: false, type: 'number' })
+  @ApiQuery({ name: 'offset', required: false, type: 'number' })
+  @ApiResponse({ status: 200, description: 'Array of x402 settlement records.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
+  listX402Settlements(@Query('status') status?: string, @Query('limit') limit?: string, @Query('offset') offset?: string) {
+    return this.x402Settlements.list(status, limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
+  }
+
+  // --- Pay links ---
+
+  @Get('links')
+  @ApiOperation({ summary: 'List all payment links', description: 'Payment links across every merchant, newest first.' })
+  @ApiQuery({ name: 'limit', required: false, type: 'number' })
+  @ApiQuery({ name: 'offset', required: false, type: 'number' })
+  @ApiResponse({ status: 200, description: 'Array of link records.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
+  listLinks(@Query('limit') limit?: string, @Query('offset') offset?: string) {
+    return this.links.list(limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
+  }
+
+  // --- Blockchain status ---
+
+  @Get('blockchain/status')
+  @ApiOperation({
+    summary: 'Get deployed contract status',
+    description: 'Deployed contract addresses and their live status (compliance, payment, treasury, channel).',
+  })
+  @ApiResponse({ status: 200, description: 'Contract addresses and status flags.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
+  getBlockchainStatus() {
+    return this.blockchain.status();
+  }
+
+  // --- Notifications ---
+
+  @Get('notifications')
+  @ApiOperation({
+    summary: 'List admin notifications',
+    description:
+      'Events derived live from existing rows: x402 settlements, disputed payments, stuck withdrawals, compliance blocks. ' +
+      'Nothing is stored separately as a notification.',
+  })
+  @ApiResponse({ status: 200, description: 'Array of notification objects.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
+  listNotifications() {
+    return this.notifications.list();
+  }
+
+  // --- Treasury ---
+
+  @Get('treasury/status')
+  @ApiOperation({ summary: 'Get treasury contract state', description: 'Treasury contract state and balances.' })
+  @ApiResponse({ status: 200, description: 'Treasury status object.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
+  getTreasuryStatus() {
+    return this.treasury.status();
+  }
+
+  // --- Fee revenue ---
+
+  @Get('fee-revenue/summary')
+  @ApiOperation({ summary: 'Fee revenue totals', description: 'Aggregate fee revenue from confirmed payments.' })
+  @ApiResponse({ status: 200, description: 'Fee revenue summary.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
+  getFeeRevenueSummary() {
+    return this.feeRevenue.summary();
+  }
+
+  @Get('fee-revenue/daily')
+  @ApiOperation({ summary: 'Daily fee revenue series', description: 'Daily fee revenue for the last N days.' })
+  @ApiQuery({ name: 'days', required: false, type: 'number', description: 'Number of days (default 30)' })
+  @ApiResponse({ status: 200, description: 'Array of { date, amount } objects.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
+  getFeeRevenueDaily(@Query('days') days?: string) {
+    return this.feeRevenue.daily(days ? Number(days) : undefined);
+  }
+
+  // --- Users ---
+  // Every unique payments.payer_address, not a dedicated user account —
+  // see AdminUsersService's comment for why that's the honest framing.
+
+  @Get('users')
+  @ApiOperation({
+    summary: 'List payer addresses',
+    description: 'Every unique payer address, with payment count and volume across all statuses. Not a dedicated user table.',
+  })
+  @ApiQuery({ name: 'limit', required: false, type: 'number' })
+  @ApiQuery({ name: 'offset', required: false, type: 'number' })
+  @ApiResponse({ status: 200, description: 'Array of payer address summaries.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
+  listUsers(@Query('limit') limit?: string, @Query('offset') offset?: string) {
+    return this.users.list(limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
+  }
+
+  // --- Wallets ---
+  // Cross-references payer/merchant/blocked roles for the same address —
+  // see AdminWalletsService for why this isn't a new data source.
+
+  @Get('wallets')
+  @ApiOperation({
+    summary: 'List all addresses with their roles',
+    description: 'Cross-references every address in the system with its roles: merchant, payer, blocked.',
+  })
+  @ApiQuery({ name: 'limit', required: false, type: 'number' })
+  @ApiQuery({ name: 'offset', required: false, type: 'number' })
+  @ApiResponse({ status: 200, description: 'Array of wallet role objects.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
+  listWallets(@Query('limit') limit?: string, @Query('offset') offset?: string) {
+    return this.wallets.list(limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
+  }
+
+  // --- Exchange rate ---
+
+  @Get('exchange-rate/live')
+  @ApiOperation({ summary: 'Live exchange rates', description: 'Current XLM and EURC to USD rates used for fee math.' })
+  @ApiResponse({ status: 200, description: 'Live exchange rate object.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
+  getLiveExchangeRate() {
+    return this.exchangeRate.liveXlmUsdcRate();
+  }
+
+  @Get('exchange-rate/conversions')
+  @ApiOperation({ summary: 'Exchange rate conversion history', description: 'Rates applied to individual payments.' })
+  @ApiQuery({ name: 'limit', required: false, type: 'number' })
+  @ApiResponse({ status: 200, description: 'Array of conversion records.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
+  listExchangeRateConversions(@Query('limit') limit?: string) {
+    return this.exchangeRate.recentConversions(limit ? Number(limit) : undefined);
+  }
+
+  // --- Referrals ---
+
+  @Get('referrals')
+  @ApiOperation({ summary: 'List referrals', description: 'Referral attributions and reward status.' })
+  @ApiQuery({ name: 'limit', required: false, type: 'number' })
+  @ApiQuery({ name: 'offset', required: false, type: 'number' })
+  @ApiResponse({ status: 200, description: 'Array of referral records.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
+  listReferrals(@Query('limit') limit?: string, @Query('offset') offset?: string) {
+    return this.referrals.list(limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
+  }
+
+  // --- Bazaar listings ---
+
+  @Get('bazaar-listings')
+  @ApiOperation({ summary: 'List x402 Bazaar submissions', description: 'Submissions awaiting review. Only approved listings reach the public manifest.' })
+  @ApiQuery({ name: 'status', required: false, type: 'string', description: 'Filter by status: pending | approved | rejected' })
+  @ApiResponse({ status: 200, description: 'Array of bazaar listing records.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
+  listBazaarListings(@Query('status') status?: string) {
+    return this.bazaar.list(status);
+  }
+
+  @Patch('bazaar-listings/:id/status')
   @ApiOperation({
     summary: 'Approve or reject a Bazaar listing',
     description: 'Sets a Bazaar listing status. Logged to admin_actions.',
@@ -436,5 +647,50 @@ export class AdminController {
       previousStatus: previous_status,
     });
     return listing;
+  }
+
+  // --- Facilitator spend guard ---
+  // Resume is deliberately a separate, manual admin action — see
+  // FacilitatorSpendGuardService for why a halt never auto-clears
+  // (a compromised but still-legitimate signing process, not a leaked key).
+
+  @Get('facilitator/status')
+  @ApiOperation({
+    summary: 'Facilitator spend-guard status',
+    description: 'Returns today\'s facilitator spend against the cap, and whether signing is currently halted.',
+  })
+  @ApiResponse({ status: 200, description: 'Spend guard status.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
+  getFacilitatorStatus() {
+    return this.facilitatorSpendGuard.status();
+  }
+
+  @Post('facilitator/resume')
+  @ApiOperation({
+    summary: 'Resume facilitator signing after a halt',
+    description:
+      'Clears a facilitator spend-guard halt. Deliberately manual — automatic resumption after a halt would defeat the purpose of the guard.',
+  })
+  @ApiResponse({ status: 200, description: 'Returns { ok: true }.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
+  async resumeFacilitator(@Req() req: AuthedAdminRequest) {
+    const cleared = await this.facilitatorSpendGuard.resume();
+    await this.actions.log(req.admin.id, 'facilitator.resume', 'facilitator', 'spend-guard', cleared);
+    return { ok: true };
+  }
+
+  // Surfaced back to the admin UI as a recent-activity feed rather than
+  // just written and forgotten — an audit log nobody reads back isn't
+  // accountability, it's a checkbox.
+  @Get('activity')
+  @ApiOperation({
+    summary: 'Recent admin actions',
+    description: 'Audit trail of admin mutations: who, what, on what, when, plus free-text reason. Newest first.',
+  })
+  @ApiQuery({ name: 'limit', required: false, type: 'number', description: 'Max records to return (default 50)' })
+  @ApiResponse({ status: 200, description: 'Array of admin action records.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
+  recentActivity(@Query('limit') limit?: string) {
+    return this.actions.recent(limit ? Number(limit) : undefined);
   }
 }
