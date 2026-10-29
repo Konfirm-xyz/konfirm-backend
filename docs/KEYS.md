@@ -32,6 +32,7 @@ The multisig-deployer route below is still a valid alternative/complement for an
 3. Move the deployer account to a multisig (route 1 above), or rotate via `set_admin` (route 2, already live — no redeploy needed).
 4. Remove `STELLAR_DEPLOYER_SECRET_KEY` from production. Confirm the service boots and signs a settlement.
 5. Confirm `FACILITATOR_DAILY_SPEND_CAP_USDC` is set to a sensible value.
+6. **Seed a compliance canary address and set `COMPLIANCE_CANARY_ADDRESS`** (backend#210). Immediately after the compliance contract's `initialize` call succeeds, `block_address` one throwaway address you control (it needs no funding — it's never used for anything but this check) and set `COMPLIANCE_CANARY_ADDRESS` to it in that environment. Without this step, `isAllowedOnChain()`'s success path has no way to tell "screening is genuinely running" from "the compliance contract is uninitialized or pointed at the wrong ID" — see `src/common/onchain-compliance.ts`'s `checkComplianceCanary()`. With it set, `/admin/blockchain/status`'s `complianceCanary` field reads `{ configured: true, ok: true }` in the healthy case; `ok: false` (and a `console.error('[compliance] CANARY BREACH'...)` line) means compliance screening itself may not be running, independent of any one payment's outcome. Skipping this step leaves the check silently disabled (`{ configured: false, ok: null }`), not failing — it will not page anyone on its own.
 
 ## Converting the deployer to a 2-of-3 multisig (runbook)
 
