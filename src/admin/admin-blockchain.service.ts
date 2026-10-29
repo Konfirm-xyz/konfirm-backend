@@ -3,6 +3,7 @@ import { Horizon, rpc } from '@stellar/stellar-sdk';
 import { withRetry } from '../common/retry';
 import { HORIZON_URL, RPC_URL } from '../common/stellar-network';
 import { FACILITATOR_ADDRESS, COMPLIANCE_CONTRACT_ID, PAYMENT_CONTRACT_ID, TREASURY_CONTRACT_ID, CHANNEL_CONTRACT_ID } from '../common/stellar-network';
+import { checkComplianceCanary } from '../common/onchain-compliance';
 
 
 // Same facilitator identity used everywhere else (facilitator-signer.ts,
@@ -27,9 +28,10 @@ export class AdminBlockchainService {
   private rpcServer = new rpc.Server(RPC_URL);
 
   async status() {
-    const [facilitatorResult, rpcResult] = await Promise.allSettled([
+    const [facilitatorResult, rpcResult, complianceCanary] = await Promise.allSettled([
       withRetry(() => this.horizon.loadAccount(FACILITATOR_ADDRESS), { retries: 1, timeoutMs: 8_000 }),
       this.pingRpc(),
+      checkComplianceCanary(),
     ]);
 
     return {
@@ -47,6 +49,12 @@ export class AdminBlockchainService {
       },
       rpc: rpcResult.status === 'fulfilled' ? rpcResult.value : { reachable: false, latencyMs: null, latestLedger: null },
       contracts: CONTRACTS,
+      // backend#210: detects a compliance contract that's silently
+      // uninitialized or misconfigured — see onchain-compliance.ts's
+      // checkComplianceCanary(). `ok: null` means no canary address is
+      // configured yet for this environment, not that it passed.
+      complianceCanary:
+        complianceCanary.status === 'fulfilled' ? complianceCanary.value : { configured: true, ok: false },
     };
   }
 
