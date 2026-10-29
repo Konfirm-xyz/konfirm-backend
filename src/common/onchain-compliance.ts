@@ -4,7 +4,7 @@ import type { AssembledTransaction, MethodOptions } from '@stellar/stellar-sdk/c
 import { Networks } from '@stellar/stellar-sdk';
 import { withRetry } from './retry';
 import { NETWORK_PASSPHRASE, RPC_URL } from './stellar-network';
-import { COMPLIANCE_CONTRACT_ID, DEPLOYER_ADDRESS } from './stellar-network';
+import { COMPLIANCE_CONTRACT_ID, COMPLIANCE_CANARY_ADDRESS, DEPLOYER_ADDRESS } from './stellar-network';
 
 
 // Used purely as the simulation source account for a read-only call —
@@ -73,4 +73,53 @@ export async function isAllowedOnChain(address: string): Promise<boolean> {
     clientPromise = null;
     return true;
   }
+}
+
+export interface ComplianceCanaryResult {
+  // Whether COMPLIANCE_CANARY_ADDRESS is set at all. A deploy with no
+  // canary configured isn't a breach — it just means this check can't run
+  // yet (see docs/specs/03-deployer-admin.md for the seeding step).
+  configured: boolean;
+  // Null when not configured. True means the canary is behaving as
+  // expected (blocked); false is the actual breach signal (backend#210) —
+  // a contract that's silently uninitialized, pointed at the wrong
+  // contract ID, or had its canary accidentally cleared.
+  ok: boolean | null;
+}
+
+// Detects the specific gap backend#210 describes: isAllowedOnChain()'s
+// success path trusts tx.result unconditionally, so a compliance contract
+// that's uninitialized (or just misconfigured to the wrong ID) produces no
+// exception and no signal — it looks identical to "everyone's cleared".
+// konfirm-contracts#189 already made is_allowed() fail closed on an
+// uninitialized contract (returns false with no Admin key set), which
+// closes the catastrophic "everyone silently allowed" case structurally.
+// This canary check is the detection layer the issue still asks for on
+// top of that: one address deliberately block_address()'d per environment
+// immediately after initialize (see the runbook), continuously reprobed.
+// If it ever reads back as allowed, something is wrong with compliance
+// screening itself, independent of any one payment's outcome.
+//
+// Deliberately reuses isAllowedOnChain rather than a bespoke client call:
+// an RPC outage already fails open there (loudly, via the existing
+// console.warn) and would make this read back as "canary cleared" too —
+// an indistinguishable false alarm during a real RPC outage is the
+// intentional, safer failure mode here, not a bug to route around.
+export async function checkComplianceCanary(): Promise<ComplianceCanaryResult> {
+  if (!COMPLIANCE_CANARY_ADDRESS) {
+    return { configured: false, ok: null };
+  }
+  const allowed = await isAllowedOnChain(COMPLIANCE_CANARY_ADDRESS);
+  if (allowed) {
+    // Distinct from the RPC-fail-open warning above: this is the "screening
+    // itself may not be running" alarm backend#210 asks for, not a transient
+    // connectivity blip. error level (not warn) and a distinct, greppable
+    // prefix so it can be wired to real alerting later without re-deriving
+    // which log lines matter.
+    // eslint-disable-next-line no-console
+    console.error('[compliance] CANARY BREACH: canary address reads as allowed — compliance screening may not be running', {
+      canary: COMPLIANCE_CANARY_ADDRESS,
+    });
+  }
+  return { configured: true, ok: !allowed };
 }
