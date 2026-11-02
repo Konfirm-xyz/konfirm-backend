@@ -287,6 +287,45 @@ export class AdminController {
     return merchant;
   }
 
+  @Get('merchants/:id/team')
+  @ApiOperation({
+    summary: 'Get team members for a merchant',
+    description:
+      'Returns all merchant_members rows for this merchant plus any pending (open, unexpired) invites. ' +
+      'Read-only visibility — use DELETE /admin/merchants/:id/team/members/:memberId to remove a member.',
+  })
+  @ApiParam({ name: 'id', description: 'Merchant UUID', type: 'string' })
+  @ApiResponse({ status: 200, description: '{ members, pendingInvites }' })
+  @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
+  @ApiResponse({ status: 404, description: 'Merchant not found.' })
+  getMerchantTeam(@Param('id') id: string) {
+    return this.adminTeam.getMerchantTeam(id);
+  }
+
+  @Delete('merchants/:id/team/members/:memberId')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Remove a team member (admin)',
+    description:
+      'Admin-level member removal — bypasses the owner-only and last-owner guards ' +
+      'that the merchant-facing endpoint enforces. ' +
+      'Use this to revoke access to a compromised account. Logged to admin_actions.',
+  })
+  @ApiParam({ name: 'id', description: 'Merchant UUID', type: 'string' })
+  @ApiParam({ name: 'memberId', description: 'merchant_members UUID', type: 'string' })
+  @ApiResponse({ status: 200, description: '{ ok: true }' })
+  @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
+  @ApiResponse({ status: 404, description: 'Merchant or member not found.' })
+  async adminRemoveTeamMember(
+    @Param('id') merchantId: string,
+    @Param('memberId') memberId: string,
+    @Req() req: AuthedAdminRequest,
+  ) {
+    await this.adminTeam.removeMember(merchantId, memberId);
+    await this.actions.log(req.admin.id, 'merchant.team.remove-member', 'merchant', merchantId, { memberId });
+    return { ok: true };
+  }
+
   // --- Payments ---
 
   @Get('payments')

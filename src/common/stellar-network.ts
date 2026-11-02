@@ -99,6 +99,7 @@ export const ENV_NAMES = {
   deployer: 'DEPLOYER_ADDRESS',
   facilitator: 'FACILITATOR_ADDRESS',
   treasurySigners: 'TREASURY_SIGNERS',
+  complianceCanary: 'COMPLIANCE_CANARY_ADDRESS',
 } as const;
 
 const pick = (envName: string, fallback: string | undefined): string | undefined => process.env[envName] || fallback;
@@ -118,6 +119,12 @@ export const COMPLIANCE_CONTRACT_ID = pick(ENV_NAMES.compliance, PRESET.contract
 export const PAYMENT_CONTRACT_ID = pick(ENV_NAMES.payment, PRESET.contracts.payment) as string;
 export const TREASURY_CONTRACT_ID = pick(ENV_NAMES.treasury, PRESET.contracts.treasury) as string;
 export const CHANNEL_CONTRACT_ID = pick(ENV_NAMES.channel, PRESET.contracts.channel) as string;
+
+// No preset — there is no sane hardcoded default for a "this address must
+// be blocked" canary, it has to be seeded on-chain per environment (see
+// docs/specs/03-deployer-admin.md's post-initialize step). Unset means the
+// canary check is simply skipped, not that it defaults to some address.
+export const COMPLIANCE_CANARY_ADDRESS: string | undefined = pick(ENV_NAMES.complianceCanary, undefined);
 // The read-only simulation source for contract calls, and the deployer account.
 export const DEPLOYER_ADDRESS = pick(ENV_NAMES.deployer, PRESET.deployer) as string;
 export const FACILITATOR_ADDRESS = pick(ENV_NAMES.facilitator, PRESET.facilitator) as string;

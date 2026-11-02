@@ -1,4 +1,4 @@
-import { isAllowedOnChain } from './onchain-compliance';
+import { isAllowedOnChain, checkComplianceCanary } from './onchain-compliance';
 
 // Mock the Client.from() and the contract call — using the same approach
 // as kms-ed25519-signer.spec.ts where AWS SDK is mocked. The contract call
@@ -112,5 +112,72 @@ describe('onchain-compliance.isAllowedOnChain', () => {
     expect(consoleWarnSpy).toHaveBeenCalled();
 
     consoleWarnSpy.mockRestore();
+  });
+});
+
+describe('onchain-compliance.checkComplianceCanary (backend#210)', () => {
+  const ORIGINAL_CANARY_ENV = process.env.COMPLIANCE_CANARY_ADDRESS;
+
+  // jest.resetModules() makes the *next* require() of a jest.mock()'d
+  // module re-invoke its factory, producing a brand-new Client.from mock
+  // distinct from any reference captured before the reset (the pre-existing
+  // "clears clientPromise on failure" test above has this exact bug, which
+  // is why it already fails independently of this change — confirmed
+  // against a clean `git stash` baseline). Re-requiring both the mock and
+  // the module under test together, every time, after every reset, avoids
+  // it rather than reproducing it.
+  function freshModules() {
+    jest.resetModules();
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const Client = require('@stellar/stellar-sdk/contract').Client;
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const onchainCompliance = require('./onchain-compliance');
+    return { Client, onchainCompliance };
+  }
+
+  afterEach(() => {
+    if (ORIGINAL_CANARY_ENV === undefined) delete process.env.COMPLIANCE_CANARY_ADDRESS;
+    else process.env.COMPLIANCE_CANARY_ADDRESS = ORIGINAL_CANARY_ENV;
+  });
+
+  it('reports not configured, and skips the on-chain call, when no canary address is set', async () => {
+    delete process.env.COMPLIANCE_CANARY_ADDRESS;
+    const { Client, onchainCompliance } = freshModules();
+
+    const result = await onchainCompliance.checkComplianceCanary();
+    expect(result).toEqual({ configured: false, ok: null });
+    expect(Client.from).not.toHaveBeenCalled();
+  });
+
+  it('reports ok: true when the canary address correctly reads as blocked', async () => {
+    process.env.COMPLIANCE_CANARY_ADDRESS = 'GDIET4T37N35XU4FY52RMR4Z653WYFITEHGIJXN4VEQTDYR5JSURJDPL';
+    const { Client, onchainCompliance } = freshModules();
+    Client.from.mockResolvedValueOnce({
+      is_allowed: jest.fn().mockResolvedValue({ result: false }), // blocked, as expected
+    });
+
+    const result = await onchainCompliance.checkComplianceCanary();
+    expect(result).toEqual({ configured: true, ok: true });
+  });
+
+  it('simulates the deploy-pipeline bug backend#210 describes: reports ok: false and logs a distinct alert when the canary is wrongly allowed', async () => {
+    const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation();
+    process.env.COMPLIANCE_CANARY_ADDRESS = 'GDIET4T37N35XU4FY52RMR4Z653WYFITEHGIJXN4VEQTDYR5JSURJDPL';
+    const { Client, onchainCompliance } = freshModules();
+    // An uninitialized (or wrongly-pointed) compliance contract returning
+    // `true` through its normal success path — the exact failure mode an
+    // RPC-exception-only check would never catch.
+    Client.from.mockResolvedValueOnce({
+      is_allowed: jest.fn().mockResolvedValue({ result: true }),
+    });
+
+    const result = await onchainCompliance.checkComplianceCanary();
+    expect(result).toEqual({ configured: true, ok: false });
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('[compliance] CANARY BREACH'),
+      expect.objectContaining({ canary: expect.any(String) }),
+    );
+
+    consoleErrorSpy.mockRestore();
   });
 });
