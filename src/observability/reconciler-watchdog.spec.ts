@@ -9,8 +9,12 @@ describe('ReconcilerWatchdogService', () => {
   const fixtureEmail = `watchdog-${Date.now()}@example.com`;
   const originalCap = process.env.FACILITATOR_DAILY_SPEND_CAP_USDC;
   const spendGuard = new FacilitatorSpendGuardService();
-  let fixtureMerchantId: string;
-  let fixtureSettlementId: string;
+  // Definite assignment (`!`): both are set inside the test body before any
+  // given test's afterEach runs. The `?? null` below each use is the real
+  // safety net -- it's what actually protects a test that fails before
+  // assignment (e.g. an early assertion throw) from an undefined-id delete.
+  let fixtureMerchantId!: string;
+  let fixtureSettlementId!: string;
 
   beforeEach(() => {
     errors.length = 0;
