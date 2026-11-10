@@ -26,6 +26,7 @@ import { AdminTeamService } from './admin-team.service';
 import { FacilitatorSpendGuardService } from '../facilitator/facilitator-spend-guard.service';
 import { AuthService } from '../auth/auth.service';
 import { zodBody } from '../common/zod-to-openapi';
+import { listQuerySchema, ListQuery } from './admin.schemas';
 
 const passwordResetSchema = z.object({
   reason: z.string().min(3).max(500),
@@ -146,8 +147,8 @@ export class AdminController {
   @ApiQuery({ name: 'offset', required: false, type: 'number', description: 'Pagination offset' })
   @ApiResponse({ status: 200, description: 'Array of merchant records.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  listMerchants(@Query('limit') limit?: string, @Query('offset') offset?: string) {
-    return this.merchants.list(limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
+  listMerchants(@Query(new ZodValidationPipe(listQuerySchema)) query: ListQuery) {
+    return this.merchants.list(query.limit, query.offset);
   }
 
   @Post('merchants/:id/password-reset')
@@ -335,8 +336,11 @@ export class AdminController {
   @ApiQuery({ name: 'offset', required: false, type: 'number', description: 'Pagination offset' })
   @ApiResponse({ status: 200, description: 'Array of payment records.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  listPayments(@Query('status') status?: string, @Query('limit') limit?: string, @Query('offset') offset?: string) {
-    return this.payments.list(status, limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
+  listPayments(
+    @Query('status') status?: string,
+    @Query(new ZodValidationPipe(listQuerySchema)) query: ListQuery = {},
+  ) {
+    return this.payments.list(status, query.limit, query.offset);
   }
 
   @Patch('payments/:id/status')
@@ -516,8 +520,11 @@ export class AdminController {
   @ApiQuery({ name: 'offset', required: false, type: 'number' })
   @ApiResponse({ status: 200, description: 'Array of x402 settlement records.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  listX402Settlements(@Query('status') status?: string, @Query('limit') limit?: string, @Query('offset') offset?: string) {
-    return this.x402Settlements.list(status, limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
+  listX402Settlements(
+    @Query('status') status?: string,
+    @Query(new ZodValidationPipe(listQuerySchema)) query: ListQuery = {},
+  ) {
+    return this.x402Settlements.list(status, query.limit, query.offset);
   }
 
   // --- Pay links ---
@@ -528,8 +535,8 @@ export class AdminController {
   @ApiQuery({ name: 'offset', required: false, type: 'number' })
   @ApiResponse({ status: 200, description: 'Array of link records.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  listLinks(@Query('limit') limit?: string, @Query('offset') offset?: string) {
-    return this.links.list(limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
+  listLinks(@Query(new ZodValidationPipe(listQuerySchema)) query: ListQuery) {
+    return this.links.list(query.limit, query.offset);
   }
 
   // --- Blockchain status ---
@@ -602,8 +609,8 @@ export class AdminController {
   @ApiQuery({ name: 'offset', required: false, type: 'number' })
   @ApiResponse({ status: 200, description: 'Array of payer address summaries.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  listUsers(@Query('limit') limit?: string, @Query('offset') offset?: string) {
-    return this.users.list(limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
+  listUsers(@Query(new ZodValidationPipe(listQuerySchema)) query: ListQuery) {
+    return this.users.list(query.limit, query.offset);
   }
 
   // --- Wallets ---
@@ -619,8 +626,8 @@ export class AdminController {
   @ApiQuery({ name: 'offset', required: false, type: 'number' })
   @ApiResponse({ status: 200, description: 'Array of wallet role objects.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  listWallets(@Query('limit') limit?: string, @Query('offset') offset?: string) {
-    return this.wallets.list(limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
+  listWallets(@Query(new ZodValidationPipe(listQuerySchema)) query: ListQuery) {
+    return this.wallets.list(query.limit, query.offset);
   }
 
   // --- Exchange rate ---
@@ -638,8 +645,8 @@ export class AdminController {
   @ApiQuery({ name: 'limit', required: false, type: 'number' })
   @ApiResponse({ status: 200, description: 'Array of conversion records.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  listExchangeRateConversions(@Query('limit') limit?: string) {
-    return this.exchangeRate.recentConversions(limit ? Number(limit) : undefined);
+  listExchangeRateConversions(@Query(new ZodValidationPipe(listQuerySchema)) query: ListQuery) {
+    return this.exchangeRate.recentConversions(query.limit);
   }
 
   // --- Referrals ---
@@ -650,8 +657,8 @@ export class AdminController {
   @ApiQuery({ name: 'offset', required: false, type: 'number' })
   @ApiResponse({ status: 200, description: 'Array of referral records.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  listReferrals(@Query('limit') limit?: string, @Query('offset') offset?: string) {
-    return this.referrals.list(limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
+  listReferrals(@Query(new ZodValidationPipe(listQuerySchema)) query: ListQuery) {
+    return this.referrals.list(query.limit, query.offset);
   }
 
   // --- Bazaar listings ---
@@ -729,7 +736,7 @@ export class AdminController {
   @ApiQuery({ name: 'limit', required: false, type: 'number', description: 'Max records to return (default 50)' })
   @ApiResponse({ status: 200, description: 'Array of admin action records.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  recentActivity(@Query('limit') limit?: string) {
-    return this.actions.recent(limit ? Number(limit) : undefined);
+  recentActivity(@Query(new ZodValidationPipe(listQuerySchema)) query: ListQuery) {
+    return this.actions.recent(query.limit);
   }
 }

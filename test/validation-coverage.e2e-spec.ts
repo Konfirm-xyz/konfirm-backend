@@ -184,7 +184,7 @@ describe('validation coverage: signup address, admin enums, pagination, rate lim
 
       // Instead, create a payment directly in the database for this test
       const result = await pool.query(
-        `INSERT INTO links (merchant_id, amount_usdc, currency, description) 
+        `INSERT INTO links (merchant_id, amount_usdc, currency, description)
          VALUES ((SELECT id FROM merchants WHERE email = $1), '5.00', 'XLM', 'test link')
          RETURNING id`,
         [merchantEmail],
@@ -192,11 +192,31 @@ describe('validation coverage: signup address, admin enums, pagination, rate lim
       const linkId = result.rows[0]?.id;
 
       if (linkId) {
+        // Real payments table schema (db/migrations/003_payments.up.sql) has
+        // no `currency` or `payer` column, and its status CHECK constraint
+        // doesn't allow 'pending' -- there is no INSERT path for a pending
+        // row; the reconciler is the only writer, after Horizon has already
+        // confirmed the transfer (see docs/ARCHITECTURE.md). This was a
+        // stale fixture written against a schema that never matched
+        // reality. Columns and a starting status ('paid', the table's own
+        // default) now match test/payment-visibility.e2e-spec.ts's
+        // already-correct direct-insert pattern for the same table.
+        const stamp = Date.now();
         const paymentResult = await pool.query(
-          `INSERT INTO payments (link_id, merchant_id, amount_usdc, currency, status, payer)
-           VALUES ($1, (SELECT id FROM merchants WHERE email = $2), '5.00', 'XLM', 'pending', 'GDIET4T37N35XU4FY52RMR4Z653WYFITEHGIJXN4VEQTDYR5JSURJDPL')
+          `INSERT INTO payments (link_id, merchant_id, muxed_id, muxed_address, payer_address,
+              asset_code, amount_usdc, fee_usdc, net_usdc, channel, status, paging_token, tx_hash, ledger_sequence)
+           SELECT $1, id, $2::bigint, $3, $4, 'USDC', 5, 0, 5, 'hosted_checkout', 'paid', $5, $6, 1
+           FROM merchants WHERE email = $7
            RETURNING id`,
-          [linkId, merchantEmail],
+          [
+            linkId,
+            stamp,
+            `vcov-muxed-${stamp}`,
+            'GDIET4T37N35XU4FY52RMR4Z653WYFITEHGIJXN4VEQTDYR5JSURJDPL',
+            `vcov-paging-${stamp}`,
+            `vcov-tx-${stamp}`,
+            merchantEmail,
+          ],
         );
         paymentId = paymentResult.rows[0]?.id;
       }

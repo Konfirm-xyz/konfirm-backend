@@ -141,8 +141,14 @@ describe('FacilitatorSpendGuardService', () => {
   });
 
   it('runs every pooled session in UTC, so the daily window is UTC midnight', async () => {
-    const { rows } = await pool.query<{ timezone: string }>('SHOW timezone');
-    expect(rows[0].timezone).toBe('UTC');
+    // Postgres's SHOW command returns the GUC's canonical display name as
+    // the result column, which for the `timezone` setting is `TimeZone`
+    // (verified against the real driver output, not assumed) -- not a
+    // lowercase `timezone`. This was a stale field-name expectation in the
+    // test itself, not a timezone-environment-dependent assertion: the pool
+    // (src/db/pool.ts) already pins every session via `-c timezone=UTC`.
+    const { rows } = await pool.query<{ TimeZone: string }>('SHOW timezone');
+    expect(rows[0].TimeZone).toBe('UTC');
   });
 
   it("keeps the spend window pinned to UTC even when a session's timezone drifts", async () => {
@@ -152,8 +158,8 @@ describe('FacilitatorSpendGuardService', () => {
     try {
       await client.query("SET timezone TO 'Pacific/Kiritimati'");
       // A fresh pooled connection must still start in UTC.
-      const { rows } = await pool.query<{ timezone: string }>('SHOW timezone');
-      expect(rows[0].timezone).toBe('UTC');
+      const { rows } = await pool.query<{ TimeZone: string }>('SHOW timezone');
+      expect(rows[0].TimeZone).toBe('UTC');
       const { rows: boundary } = await pool.query<{ utc_midnight: boolean }>(
         "SELECT date_trunc('day', NOW()) = (date_trunc('day', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') AS utc_midnight",
       );

@@ -57,7 +57,11 @@ describe('ReconcilerWatchdogService', () => {
     const spy = jest.spyOn(pool, 'query').mockRejectedValueOnce(new Error('connection terminated') as never);
     try {
       const r = await svc.check();
-      expect(r).toEqual({ stalled: false, ageMinutes: null });
+      // spendGuardHalted/failedFeeSettlements were added to the real return
+      // shape (reconciler-watchdog.service.ts's catch branch) after this
+      // expectation was written -- confirmed against the current service
+      // code, not assumed; this was a stale expectation, not a bug.
+      expect(r).toEqual({ stalled: false, ageMinutes: null, spendGuardHalted: false, failedFeeSettlements: 0 });
       expect(errors.length).toBe(1);
       expect(errors[0]).toMatch(/watchdog check failed: connection terminated/);
     } finally {
