@@ -6,3 +6,7 @@ reconciler/target/
 *.sqlite
 db/backups/
 coverage/
+
+# Claude Code's own local tooling state (agent worktrees, session scratch) --
+# never project source, never committed
+.claude/
