@@ -2,13 +2,26 @@
 
 ## Local setup
 
-Use Node.js 20+ and PostgreSQL 15+, with the database server running. From the
-repository root, install dependencies and prepare the dedicated test database:
+Use Node.js 20+ and PostgreSQL 15+. You can start a local PostgreSQL instance with one command using Docker:
+
+```bash
+docker compose up -d
+```
+
+This provisions PostgreSQL with `konfirm_dev` and `konfirm_test` pre-configured on port `5432`.
+
+Alternatively, if running PostgreSQL natively, ensure the server is active and create the databases:
+
+```bash
+createdb konfirm_dev
+createdb konfirm_test
+```
+
+From the repository root, install dependencies and prepare the database:
 
 ```bash
 npm install
-createdb konfirm_test
-DATABASE_URL=postgres:///konfirm_test npm run migrate:up
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/konfirm_dev npm run migrate:up
 ```
 
 `test/env.ts` selects `postgres:///konfirm_test` by default; do not point it at
