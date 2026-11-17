@@ -1,5 +1,5 @@
-import { BadRequestException, Body, ConflictException, Controller, Delete, Get, HttpCode, Logger, Param, Patch, Post, Req, Res, UseGuards } from '@nestjs/common';
-import { ApiBody, ApiCookieAuth, ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { BadRequestException, Body, ConflictException, Controller, Delete, Get, HttpCode, Logger, Param, Patch, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
+import { ApiBody, ApiCookieAuth, ApiOperation, ApiParam, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
 import { z } from 'zod';
@@ -52,6 +52,10 @@ const forgotPasswordSchema = z.object({
 const resetPasswordSchema = z.object({
   token: z.string().min(20).max(200),
   password: passwordSchema,
+});
+
+const confirmEmailSchema = z.object({
+  token: z.string().min(20).max(200),
 });
 
 // Tighter limit for flows that send email (same ceiling as forgot-password).
@@ -176,6 +180,39 @@ export class AuthController {
   async resetPassword(@Body(new ZodValidationPipe(resetPasswordSchema)) body: z.infer<typeof resetPasswordSchema>) {
     await this.auth.resetPassword(body.token, body.password);
     return { ok: true };
+  }
+
+  @Post('confirm-email')
+  @HttpCode(200)
+  @Throttle(AUTH_THROTTLE)
+  @ApiOperation({
+    summary: 'Confirm merchant signup email',
+    description:
+      'Validates an email verification token and transitions merchant status from pending to active.',
+  })
+  @ApiBody(zodBody(confirmEmailSchema, 'Confirm email request'))
+  @ApiResponse({ status: 200, description: 'Returns { status: "active" }.' })
+  @ApiResponse({ status: 400, description: 'Token invalid, expired, or already used.' })
+  async confirmEmail(
+    @Body(new ZodValidationPipe(confirmEmailSchema)) body: z.infer<typeof confirmEmailSchema>,
+  ) {
+    return this.auth.confirmEmail(body.token);
+  }
+
+  @Get('confirm-email')
+  @Throttle(AUTH_THROTTLE)
+  @ApiOperation({
+    summary: 'Confirm merchant signup email via link',
+    description:
+      'Validates an email verification token supplied as a query parameter and activates the account.',
+  })
+  @ApiQuery({ name: 'token', required: true, type: 'string', description: 'Verification token from email' })
+  @ApiResponse({ status: 200, description: 'Returns { status: "active" }.' })
+  @ApiResponse({ status: 400, description: 'Token invalid, expired, or already used.' })
+  async confirmEmailQuery(
+    @Query(new ZodValidationPipe(confirmEmailSchema)) query: z.infer<typeof confirmEmailSchema>,
+  ) {
+    return this.auth.confirmEmail(query.token);
   }
 
   // Revokes server-side as well as clearing the cookie: a copy of the token
