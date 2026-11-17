@@ -25,7 +25,7 @@ Cashing out to a bank account is a real SEP-10 (auth) + SEP-24 (interactive with
 ## Prerequisites
 
 - Node.js 22+
-- PostgreSQL 15+, running locally
+- PostgreSQL 15+, running locally or via Docker Compose (`docker compose up -d`)
 - Rust (stable) — only needed to run the reconciler
 - The [`stellar` CLI](https://developers.stellar.org/docs/tools/cli/install-cli), on `PATH`, with a `deployer` identity configured (`stellar keys add deployer --secret-key ...`) — needed by the reconciler's on-chain compliance check (`compliance.rs`, still CLI-shelled) and, locally only, as a convenience fallback if `STELLAR_DEPLOYER_SECRET_KEY` is unset (`x402.service.ts` resolves the facilitator's signing key via `stellar keys secret deployer` in that case). The API's own compliance checks (`payments.service.ts`, `x402.service.ts`) call the compliance contract directly over Soroban RPC — no CLI involved — see [Compliance](#compliance) below.
 - [Freighter](https://www.freighter.app/) browser extension, set to Testnet, for exercising checkout yourself
@@ -35,6 +35,46 @@ Cashing out to a bank account is a real SEP-10 (auth) + SEP-24 (interactive with
 ```bash
 npm install
 ```
+
+### Database Setup
+
+#### Option A: Docker Compose (Recommended)
+
+Start a containerized PostgreSQL 15 instance with persistent volume storage:
+
+```bash
+docker compose up -d
+```
+
+This brings up PostgreSQL on port `5432` with user `postgres`, password `postgres`, and initializes both `konfirm_dev` and `konfirm_test` databases.
+
+Point your environment variables in `.env`:
+```bash
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/konfirm_dev
+TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/konfirm_test
+```
+
+Run pending database migrations:
+```bash
+npm run migrate:up
+```
+
+To stop the container:
+```bash
+docker compose down
+```
+
+#### Option B: Native PostgreSQL
+
+If running PostgreSQL natively without Docker, ensure PostgreSQL 15+ is active and create the databases:
+
+```bash
+createdb konfirm_dev
+createdb konfirm_test
+DATABASE_URL=postgres:///konfirm_dev npm run migrate:up
+```
+
+### Application Configuration
 
 Generate a real secret and create `.env`:
 
