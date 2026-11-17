@@ -89,6 +89,10 @@ const addPaymentNoteSchema = z.object({
   body: z.string().min(1).max(5000),
 });
 
+const setFacilitatorCapSchema = z.object({
+  capUsdc: z.number().nonnegative('capUsdc must be non-negative'),
+});
+
 // One controller for the whole admin resource surface rather than one per
 // domain. This has grown past the "5 resources" this comment used to say —
 // it's 18 services and ~30 routes now — but the reason still holds: every
@@ -717,6 +721,26 @@ export class AdminController {
     const cleared = await this.facilitatorSpendGuard.resume();
     await this.actions.log(req.admin.id, 'facilitator.resume', 'facilitator', 'spend-guard', cleared);
     return { ok: true };
+  }
+
+  @Patch('facilitator/cap')
+  @ApiOperation({
+    summary: 'Update daily facilitator spend cap',
+    description: 'Persists a DB-backed override of the daily spend cap in facilitator_state.',
+  })
+  @ApiBody(zodBody(setFacilitatorCapSchema, 'Update facilitator cap request'))
+  @ApiResponse({ status: 200, description: 'Returns { ok: true, capUsdc: number }.' })
+  @ApiResponse({ status: 400, description: 'Invalid cap amount.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
+  async setFacilitatorCap(
+    @Body(new ZodValidationPipe(setFacilitatorCapSchema)) body: z.infer<typeof setFacilitatorCapSchema>,
+    @Req() req: AuthedAdminRequest,
+  ) {
+    await this.facilitatorSpendGuard.setDailyCap(body.capUsdc);
+    await this.actions.log(req.admin.id, 'facilitator.set_cap', 'facilitator', 'spend-guard', {
+      capUsdc: body.capUsdc,
+    });
+    return { ok: true, capUsdc: body.capUsdc };
   }
 
   // Surfaced back to the admin UI as a recent-activity feed rather than
