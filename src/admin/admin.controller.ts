@@ -24,6 +24,7 @@ import { AdminExchangeRateService } from './admin-exchange-rate.service';
 import { AdminReferralsService } from './admin-referrals.service';
 import { AdminBazaarService } from './admin-bazaar.service';
 import { AdminTeamService } from './admin-team.service';
+import { daysQuerySchema, DaysQuery } from './admin.schemas';
 import { FacilitatorSpendGuardService } from '../facilitator/facilitator-spend-guard.service';
 import { AuthService } from '../auth/auth.service';
 import { zodBody } from '../common/zod-to-openapi';
@@ -585,9 +586,10 @@ export class AdminController {
   @ApiOperation({ summary: 'Daily fee revenue series', description: 'Daily fee revenue for the last N days.' })
   @ApiQuery({ name: 'days', required: false, type: 'number', description: 'Number of days (default 30)' })
   @ApiResponse({ status: 200, description: 'Array of { date, amount } objects.' })
+  @ApiResponse({ status: 400, description: 'Invalid query parameters.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  getFeeRevenueDaily(@Query('days') days?: string) {
-    return this.feeRevenue.daily(days ? Number(days) : undefined);
+  getFeeRevenueDaily(@Query(new ZodValidationPipe(daysQuerySchema)) query: DaysQuery) {
+    return this.feeRevenue.daily(query?.days);
   }
 
   // --- Users ---
