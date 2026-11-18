@@ -75,7 +75,26 @@ export async function applyMigrationSql(db: Pool, sql: string, trackingQuery: st
   }
 }
 
+export function validateMigrationPairs(dir: string = MIGRATIONS_DIR): { missingDown: string[] } {
+  const files = readdirSync(dir);
+  const upFiles = files.filter((f) => f.endsWith('.up.sql'));
+  const missingDown: string[] = [];
+  for (const f of upFiles) {
+    const base = f.replace(/\.up\.sql$/, '');
+    const downFile = join(dir, `${base}.down.sql`);
+    if (!existsSync(downFile)) {
+      missingDown.push(base);
+    }
+  }
+  return { missingDown };
+}
+
 async function up(): Promise<void> {
+  const { missingDown } = validateMigrationPairs();
+  if (missingDown.length > 0) {
+    throw new Error(`missing .down.sql migration(s): ${missingDown.join(', ')} — every migration must have a reversible down path`);
+  }
+
   await ensureTrackingTable();
   const { rows } = await pool.query('SELECT name FROM schema_migrations');
   const applied = new Set(rows.map((r) => r.name as string));
