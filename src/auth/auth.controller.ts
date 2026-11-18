@@ -49,6 +49,11 @@ const forgotPasswordSchema = z.object({
   email: emailSchema,
 });
 
+export const changePasswordSchema = z.object({
+  current_password: z.string().min(1, 'current password is required'),
+  new_password: passwordSchema,
+});
+
 const resetPasswordSchema = z.object({
   token: z.string().min(20).max(200),
   password: passwordSchema,
@@ -192,6 +197,31 @@ export class AuthController {
     await this.auth.logout(req.cookies?.[SESSION_COOKIE]);
     res.clearCookie(SESSION_COOKIE);
     return { ok: true };
+  }
+
+  @Post('change-password')
+  @HttpCode(200)
+  @UseGuards(AuthGuard)
+  @Throttle(AUTH_THROTTLE)
+  @ApiCookieAuth('merchant-session')
+  @ApiOperation({
+    summary: 'Change merchant password (issue #246)',
+    description:
+      'Requires the current password. Bumps session_version to invalidate all other active sessions server-side, ' +
+      'and issues a fresh session cookie for the current session.',
+  })
+  @ApiBody(zodBody(changePasswordSchema, 'Change password request'))
+  @ApiResponse({ status: 200, description: 'Password changed. A new konfirm_session cookie is set.' })
+  @ApiResponse({ status: 400, description: 'Current password is incorrect, or the new password is invalid or unchanged.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated.' })
+  async changePassword(
+    @Req() req: AuthedRequest,
+    @Body(new ZodValidationPipe(changePasswordSchema)) body: z.infer<typeof changePasswordSchema>,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const { token, merchant } = await this.auth.changePassword(req.merchant.id, body.current_password, body.new_password);
+    this.setSessionCookie(res, token);
+    return { ok: true, merchant };
   }
 
   @Get('me')
