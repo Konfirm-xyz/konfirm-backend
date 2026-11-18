@@ -725,12 +725,37 @@ export class AdminController {
   @Get('activity')
   @ApiOperation({
     summary: 'Recent admin actions',
-    description: 'Audit trail of admin mutations: who, what, on what, when, plus free-text reason. Newest first.',
+    description: 'Audit trail of admin mutations: who, what, on what, when, plus free-text reason. Supports filtering by admin, action, target, date range, and pagination. Newest first.',
   })
-  @ApiQuery({ name: 'limit', required: false, type: 'number', description: 'Max records to return (default 50)' })
+  @ApiQuery({ name: 'limit', required: false, type: 'number', description: 'Max records to return (default 20, max 100)' })
+  @ApiQuery({ name: 'offset', required: false, type: 'number', description: 'Records to skip for pagination' })
+  @ApiQuery({ name: 'admin_id', required: false, type: 'string', description: 'Filter by acting admin UUID' })
+  @ApiQuery({ name: 'action', required: false, type: 'string', description: 'Filter by action name (e.g. facilitator.pause)' })
+  @ApiQuery({ name: 'target_type', required: false, type: 'string', description: 'Filter by target type (e.g. merchant, facilitator)' })
+  @ApiQuery({ name: 'target_id', required: false, type: 'string', description: 'Filter by target identifier' })
+  @ApiQuery({ name: 'from', required: false, type: 'string', description: 'ISO start date/time filter' })
+  @ApiQuery({ name: 'to', required: false, type: 'string', description: 'ISO end date/time filter' })
   @ApiResponse({ status: 200, description: 'Array of admin action records.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  recentActivity(@Query('limit') limit?: string) {
-    return this.actions.recent(limit ? Number(limit) : undefined);
+  recentActivity(
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+    @Query('admin_id') admin_id?: string,
+    @Query('action') action?: string,
+    @Query('target_type') target_type?: string,
+    @Query('target_id') target_id?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.actions.recent({
+      limit: limit ? Number(limit) : undefined,
+      offset: offset ? Number(offset) : undefined,
+      admin_id,
+      action,
+      target_type,
+      target_id,
+      from,
+      to,
+    });
   }
 }
