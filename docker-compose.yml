@@ -1,0 +1,26 @@
+# Local Postgres for a fresh clone: `docker compose up -d` then point
+# DATABASE_URL at it (see README "Setup"). The init script creates both the
+# dev and test databases so `npm run migrate:up` and the test suite work
+# without any native Postgres install.
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: konfirm-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: konfirm
+      POSTGRES_PASSWORD: konfirm
+      POSTGRES_DB: konfirm_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - konfirm-pgdata:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U konfirm -d konfirm_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  konfirm-pgdata:

@@ -27,6 +27,7 @@ import { AdminTeamService } from './admin-team.service';
 import { FacilitatorSpendGuardService } from '../facilitator/facilitator-spend-guard.service';
 import { AuthService } from '../auth/auth.service';
 import { zodBody } from '../common/zod-to-openapi';
+import { ActivityQuery, activityQuerySchema } from './admin.schemas';
 
 const passwordResetSchema = z.object({
   reason: z.string().min(3).max(500),
@@ -728,9 +729,26 @@ export class AdminController {
     description: 'Audit trail of admin mutations: who, what, on what, when, plus free-text reason. Newest first.',
   })
   @ApiQuery({ name: 'limit', required: false, type: 'number', description: 'Max records to return (default 50)' })
+  @ApiQuery({ name: 'offset', required: false, type: 'number', description: 'Pagination offset' })
+  @ApiQuery({ name: 'admin_id', required: false, type: 'string', description: 'Filter by the admin who performed the action' })
+  @ApiQuery({ name: 'action', required: false, type: 'string', description: 'Filter by action type, e.g. merchant.suspend' })
+  @ApiQuery({ name: 'target_type', required: false, type: 'string', description: 'Filter by target type, e.g. merchant' })
+  @ApiQuery({ name: 'target_id', required: false, type: 'string', description: 'Filter by target id' })
+  @ApiQuery({ name: 'from', required: false, type: 'string', description: 'Only actions at or after this ISO 8601 timestamp' })
+  @ApiQuery({ name: 'to', required: false, type: 'string', description: 'Only actions at or before this ISO 8601 timestamp' })
   @ApiResponse({ status: 200, description: 'Array of admin action records.' })
+  @ApiResponse({ status: 400, description: 'Invalid query parameters.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  recentActivity(@Query('limit') limit?: string) {
-    return this.actions.recent(limit ? Number(limit) : undefined);
+  recentActivity(@Query(new ZodValidationPipe(activityQuerySchema)) query: ActivityQuery) {
+    return this.actions.recent({
+      adminId: query.admin_id,
+      action: query.action,
+      targetType: query.target_type,
+      targetId: query.target_id,
+      from: query.from,
+      to: query.to,
+      limit: query.limit,
+      offset: query.offset,
+    });
   }
 }
