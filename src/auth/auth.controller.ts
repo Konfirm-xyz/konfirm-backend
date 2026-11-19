@@ -29,7 +29,7 @@ const emailSchema = z.string().trim().toLowerCase().email();
 const signupSchema = z.object({
   email: emailSchema,
   password: passwordSchema,
-  name: z.string().min(1).max(200),
+  name: z.string().trim().min(1).max(200),
   // Stellar strkey account id — base32, no checksum validation here; a
   // malformed address fails loudly the first time a payout is attempted,
   // which is an acceptable place for that error to surface for a pilot.
