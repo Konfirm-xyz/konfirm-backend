@@ -92,6 +92,17 @@ export function assertKmsFacilitatorIsSeparate(facilitatorAddress: string, env: 
   }
 }
 
+// Boot-time counterpart to assertSeparateHotKeys for the KMS path: derive the
+// facilitator address from KMS and run the same separation check before the
+// app accepts traffic, instead of waiting for the first signer use. A no-op
+// when FACILITATOR_KMS_KEY_ID is unset (raw-key path, covered above).
+export async function assertKmsFacilitatorIsSeparateAtBoot(env: NodeJS.ProcessEnv = process.env): Promise<void> {
+  const kmsKeyId = env.FACILITATOR_KMS_KEY_ID;
+  if (!kmsKeyId) return;
+  const signer = await createKmsEd25519Signer(kmsKeyId);
+  assertKmsFacilitatorIsSeparate(signer.address, env);
+}
+
 let signerPromise: Promise<Ed25519Signer> | null = null;
 
 // Ships dark: FACILITATOR_KMS_KEY_ID unset means byte-for-byte the same
