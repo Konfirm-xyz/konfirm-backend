@@ -15,6 +15,55 @@ interface WithdrawTransaction {
   message?: string;
 }
 
+// SEP-24 memo types the anchor may hand back. Anything else (including
+// `text`, which Stellar's own SDK caps at 28 bytes) is rejected rather than
+// guessed at.
+const MEMO_ID_MAX = 18_446_744_073_709_551_615n; // uint64
+const MEMO_TEXT_MAX_BYTES = 28;
+const STELLAR_AMOUNT_SCALE = 7;
+const STELLAR_AMOUNT_MAX = 9_223_372_036_854_775_807n; // int64 stroops
+
+function buildWithdrawMemo(type: string, value: string): Memo {
+  switch (type) {
+    case 'id': {
+      if (!/^\d+$/.test(value) || BigInt(value) > MEMO_ID_MAX) {
+        throw new BadRequestException('the cash-out partner returned an invalid memo id');
+      }
+      return Memo.id(value);
+    }
+    case 'hash': {
+      // SEP-24 hash memos are base64-encoded 32-byte values. Buffer's base64
+      // decoder is lenient (it drops invalid characters), so round-trip the
+      // value and require an exact match to catch malformed input.
+      const decoded = Buffer.from(value, 'base64');
+      if (decoded.length !== 32 || decoded.toString('base64') !== value) {
+        throw new BadRequestException('the cash-out partner returned an invalid memo hash');
+      }
+      return Memo.hash(decoded);
+    }
+    case 'text': {
+      if (Buffer.byteLength(value, 'utf8') > MEMO_TEXT_MAX_BYTES) {
+        throw new BadRequestException('the cash-out partner returned an invalid memo text');
+      }
+      return Memo.text(value);
+    }
+    default:
+      throw new BadRequestException('the cash-out partner returned an unsupported memo type');
+  }
+}
+
+function validateWithdrawAmount(value: string): string {
+  if (!/^\d+(?:\.\d{1,7})?$/.test(value)) {
+    throw new BadRequestException('the cash-out partner returned an invalid amount');
+  }
+  const [whole, fraction = ''] = value.split('.');
+  const stroops = BigInt(whole) * 10n ** BigInt(STELLAR_AMOUNT_SCALE) + BigInt(fraction.padEnd(STELLAR_AMOUNT_SCALE, '0'));
+  if (stroops <= 0n || stroops > STELLAR_AMOUNT_MAX) {
+    throw new BadRequestException('the cash-out partner returned an invalid amount');
+  }
+  return value;
+}
+
 // Stellar's own reference/demo anchor — SEP-1 discovery at
 // https://testanchor.stellar.org/.well-known/stellar.toml confirms it speaks
 // SEP-10 (auth) and SEP-24 (interactive withdraw) against the exact same
@@ -71,14 +120,11 @@ export class WithdrawalsService {
     // A read, safe to retry — same reasoning as payments.service.ts.
     const sourceAccount = await withRetry(() => this.horizon.loadAccount(account), { retries: 2, timeoutMs: 8_000 });
 
-    let memo: Memo;
-    if (txn.withdraw_memo_type === 'id') {
-      memo = Memo.id(txn.withdraw_memo);
-    } else if (txn.withdraw_memo_type === 'hash') {
-      memo = Memo.hash(Buffer.from(txn.withdraw_memo, 'base64'));
-    } else {
-      memo = Memo.text(txn.withdraw_memo);
-    }
+    // The anchor's response is untrusted input: a malformed memo or amount
+    // must fail here with a clear error rather than silently producing a
+    // payment that sends funds to the wrong place or with the wrong memo.
+    const memo = buildWithdrawMemo(txn.withdraw_memo_type, txn.withdraw_memo);
+    const amount = validateWithdrawAmount(txn.amount_in);
 
     const tx = new TransactionBuilder(sourceAccount, {
       fee: BASE_FEE,
@@ -88,7 +134,7 @@ export class WithdrawalsService {
         Operation.payment({
           destination: txn.withdraw_anchor_account,
           asset,
-          amount: txn.amount_in,
+          amount,
         }),
       )
       .addMemo(memo)
