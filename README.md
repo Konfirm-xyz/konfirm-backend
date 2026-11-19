@@ -134,7 +134,7 @@ Admin visibility: `GET /admin/merchants/:id/team` (members + pending invites), `
 |---|---|---|---|
 | `GET` | `/payments/prepare-tx` | `linkId, muxed_id, payer` | Builds an unsigned Freighter transaction; runs compliance screening first; bundles a `ChangeTrust` op automatically if the payer has no USDC trustline yet |
 | `GET` | `/payments/pay-uri` | `linkId, muxed_id` | Returns a `web+stellar:pay` SEP-7 URI for QR/mobile-wallet checkout — no payer address needed or knowable at this point |
-| `GET` | `/payments/mine` 🔒 | — | The logged-in merchant's payments, newest first, with `status` and `flag_reason` (held payments are listed, but only `paid` counts toward totals) |
+| `GET` | `/payments/mine` 🔒 | `limit`, `offset` | The logged-in merchant's payments, newest first, with `status` and `flag_reason` (held payments are listed, but only `paid` counts toward totals). Paginated: `limit` defaults to 25 (max 1000), `offset` defaults to 0 |
 | `GET` | `/payments/mine/pending` 🔒 | — | Whether a session was reserved but hasn't landed yet (drives the "waiting" UI state) |
 | `GET` | `/links/:linkId/sessions/:muxedId` | — | The payer's own session only: `{ confirmed, payment }`, where `payment` carries amount, asset, and tx hash. The checkout page polls this. The random `muxedId` is the capability, so nothing about other payments is exposed |
 
