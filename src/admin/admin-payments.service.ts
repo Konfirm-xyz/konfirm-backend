@@ -24,7 +24,7 @@ export class AdminPaymentsService {
     return rows;
   }
 
-  async setStatus(id: string, status: 'paid' | 'held' | 'disputed') {
+  async setStatus(id: string, status: 'paid' | 'held' | 'disputed' | 'voided') {
     // Same pre-update-snapshot pattern as AdminMerchantsService.setTier.
     const { rows } = await pool.query(
       `UPDATE payments p SET status = $2

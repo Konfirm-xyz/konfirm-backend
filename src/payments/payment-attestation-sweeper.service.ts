@@ -11,6 +11,9 @@ import { PaymentAttestationService } from './payment-attestation.service';
 // keeper (two independent pg.Pool instances, two concurrent sweep() calls,
 // exactly one real on-chain checkpoint landed).
 const ATTESTATION_LOCK_KEY = 402_004;
+// Void reconciliation (issue #189) is a separate sweep with its own key so a
+// slow attestation batch can never starve it.
+const VOID_LOCK_KEY = 402_005;
 const BATCH_SIZE = 20;
 
 interface AttestationDueRow {
@@ -53,6 +56,56 @@ export class PaymentAttestationSweeperService {
       this.logger.error(`sweep failed: ${err}`);
     } finally {
       client.release();
+    }
+  }
+
+  // Reconciles on-chain voids back into Postgres: a payment that was voided
+  // on-chain (payment contract's void_payment) must stop counting as revenue
+  // and stop reading as 'paid' in merchant/admin history. Only rows that were
+  // actually attested on-chain can be voided there, so onchain_payment_id is
+  // the join key.
+  @Cron('*/5 * * * *')
+  async sweepVoids(): Promise<void> {
+    const client = await pool.connect();
+    try {
+      const { rows } = await client.query<{ locked: boolean }>('SELECT pg_try_advisory_lock($1) AS locked', [
+        VOID_LOCK_KEY,
+      ]);
+      if (!rows[0].locked) return;
+      try {
+        await this.doVoidSweep();
+      } finally {
+        await client.query('SELECT pg_advisory_unlock($1)', [VOID_LOCK_KEY]);
+      }
+    } catch (err) {
+      this.logger.error(`void sweep failed: ${err}`);
+    } finally {
+      client.release();
+    }
+  }
+
+  private async doVoidSweep(): Promise<void> {
+    const { rows } = await pool.query<{ id: string; onchain_payment_id: string }>(
+      `SELECT id, onchain_payment_id
+       FROM payments
+       WHERE status = 'paid' AND onchain_payment_id IS NOT NULL
+       ORDER BY created_at ASC
+       LIMIT $1`,
+      [BATCH_SIZE],
+    );
+
+    for (const row of rows) {
+      try {
+        if (!(await this.attestation.isVoided(row.onchain_payment_id))) continue;
+        await pool.query(
+          `UPDATE payments SET status = 'voided', voided_at = NOW() WHERE id = $1 AND status = 'paid'`,
+          [row.id],
+        );
+      } catch (err) {
+        // One row's failure must never abort the batch; the next sweep
+        // retries it.
+        this.logger.error(`void reconciliation errored for payment ${row.id}: ${err}`);
+      }
     }
   }
 

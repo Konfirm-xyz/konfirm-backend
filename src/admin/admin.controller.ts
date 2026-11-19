@@ -48,7 +48,7 @@ const setMerchantFeeBpsSchema = z.object({
 });
 
 const setPaymentStatusSchema = z.object({
-  status: z.enum(['paid', 'held', 'disputed']),
+  status: z.enum(['paid', 'held', 'disputed', 'voided']),
   reason: z.string().max(500).optional(),
 });
 
@@ -343,7 +343,7 @@ export class AdminController {
   @Patch('payments/:id/status')
   @ApiOperation({
     summary: 'Set payment status',
-    description: 'Manually override a payment status (paid/held/disputed). Logged to admin_actions.',
+    description: 'Manually override a payment status (paid/held/disputed/voided). Logged to admin_actions.',
   })
   @ApiParam({ name: 'id', description: 'Payment UUID', type: 'string' })
   @ApiBody(zodBody(setPaymentStatusSchema, 'Set payment status'))
