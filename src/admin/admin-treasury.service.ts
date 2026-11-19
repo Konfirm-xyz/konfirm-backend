@@ -2,10 +2,11 @@
 import { Injectable } from '@nestjs/common';
 import { Client } from '@stellar/stellar-sdk/contract';
 import type { AssembledTransaction, MethodOptions } from '@stellar/stellar-sdk/contract';
-import { Networks } from '@stellar/stellar-sdk';
+import { Asset, Horizon, Networks, StrKey } from '@stellar/stellar-sdk';
 import { withRetry } from '../common/retry';
-import { NETWORK_PASSPHRASE, RPC_URL } from '../common/stellar-network';
-import { USDC_SAC_ID, TREASURY_CONTRACT_ID, TREASURY_SIGNERS, DEPLOYER_ADDRESS } from '../common/stellar-network';
+import { hasTrustline } from '../common/asset';
+import { HORIZON_URL, NETWORK_PASSPHRASE, RPC_URL } from '../common/stellar-network';
+import { USDC_ISSUER, USDC_SAC_ID, TREASURY_CONTRACT_ID, TREASURY_SIGNERS, DEPLOYER_ADDRESS } from '../common/stellar-network';
 
 // USDC's SAC (SEP-41 token contract) on testnet — same address
 // @x402/stellar's own ExactStellarScheme uses (USDC_TESTNET_ADDRESS).
@@ -33,6 +34,36 @@ function getUsdcClient(): Promise<Client & SacTokenContract> {
 
 @Injectable()
 export class AdminTreasuryService {
+  private readonly horizon = new Horizon.Server(HORIZON_URL);
+
+  // The treasury contract's own account id, derived from its contract id
+  // (Stellar's contract-address derivation: the contract's 32-byte hash
+  // under the "contract" strkey version byte). This is the account whose
+  // USDC trustline a classic Payment must target to fund the contract --
+  // the SAC balance the contract spends from is that account's balance.
+  private treasuryAccountId(): string {
+    const contractHash = StrKey.decodeContract(TREASURY_CONTRACT_ID);
+    return StrKey.encodeEd25519PublicKey(contractHash);
+  }
+
+  // Read-only: does the treasury contract account already hold a USDC
+  // trustline? A contract account can't sign a ChangeTrust itself, so the
+  // trustline has to be sponsored/created out of band (see
+  // scripts/fund-testnet-treasury.mjs). Surfacing it here is what turns
+  // "execute traps with 0 balance" into an actionable admin signal.
+  private async usdcTrustline(): Promise<boolean | null> {
+    try {
+      const account = await withRetry(() => this.horizon.loadAccount(this.treasuryAccountId()), {
+        retries: 1,
+        timeoutMs: 8_000,
+      });
+      const balances = account.balances as Array<{ asset_code?: string; asset_issuer?: string }>;
+      return hasTrustline(balances, new Asset('USDC', USDC_ISSUER));
+    } catch {
+      return null;
+    }
+  }
+
   async status() {
     let usdcBalance: string | null = null;
     let reachable = true;
@@ -54,9 +85,11 @@ export class AdminTreasuryService {
 
     return {
       contract_id: TREASURY_CONTRACT_ID,
+      contract_account_id: this.treasuryAccountId(),
       signers: TREASURY_SIGNERS,
       threshold: '2-of-3',
       usdc_balance: usdcBalance,
+      usdc_trustline: await this.usdcTrustline(),
       reachable,
       // Checkout's USDC-denominated fee revenue reaches this contract via
       // FeeCollectionSweepService, not a direct call at checkout time — a
