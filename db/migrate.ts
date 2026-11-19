@@ -4,6 +4,7 @@
 // pending, and `down` can revert the most recent migration(s) for real,
 // which the previous `for f in *.sql; do psql -f "$f"; done` approach never
 // could — it had no record of state and no way back.
+import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { Pool } from 'pg';
@@ -25,6 +26,13 @@ export function isNonTransactional(sql: string): boolean {
   return sql.split(/\r?\n/, 1)[0].trim() === NO_TRANSACTION_MARKER;
 }
 
+// SHA-256 of the migration file's exact bytes. Recorded at apply time so a
+// later edit to an already-applied file is caught instead of silently
+// ignored — the bug class that let 006_admins' role column drift unnoticed.
+export function checksumOf(sql: string): string {
+  return createHash('sha256').update(sql, 'utf8').digest('hex');
+}
+
 async function ensureTrackingTable(): Promise<void> {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -32,6 +40,38 @@ async function ensureTrackingTable(): Promise<void> {
       applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+  // Existing installs predate the checksum column; add it in place. Rows
+  // applied before this change have NULL and are backfilled on the next `up`.
+  await pool.query('ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS checksum TEXT');
+}
+
+// Fails loudly, before applying anything, when an already-applied migration
+// file no longer matches the checksum recorded when it ran. NULL checksums
+// (rows from before checksums existed) are backfilled rather than rejected.
+async function verifyAppliedChecksums(): Promise<void> {
+  const { rows } = await pool.query('SELECT name, checksum FROM schema_migrations');
+  const mismatches: string[] = [];
+
+  for (const { name, checksum } of rows as { name: string; checksum: string | null }[]) {
+    const file = join(MIGRATIONS_DIR, `${name}.up.sql`);
+    if (!existsSync(file)) {
+      mismatches.push(`${name}: applied but ${name}.up.sql is missing`);
+      continue;
+    }
+    const actual = checksumOf(readFileSync(file, 'utf8'));
+    if (checksum === null) {
+      await pool.query('UPDATE schema_migrations SET checksum = $2 WHERE name = $1', [name, actual]);
+    } else if (checksum !== actual) {
+      mismatches.push(`${name}: recorded ${checksum}, file is now ${actual}`);
+    }
+  }
+
+  if (mismatches.length > 0) {
+    throw new Error(
+      `migration checksum mismatch — refusing to apply anything:\n  ${mismatches.join('\n  ')}\n` +
+        'An already-applied migration file was edited. Revert the edit and add a new migration instead.',
+    );
+  }
 }
 
 function pendingUpFiles(applied: Set<string>): string[] {
@@ -77,6 +117,7 @@ export async function applyMigrationSql(db: Pool, sql: string, trackingQuery: st
 
 async function up(): Promise<void> {
   await ensureTrackingTable();
+  await verifyAppliedChecksums();
   const { rows } = await pool.query('SELECT name FROM schema_migrations');
   const applied = new Set(rows.map((r) => r.name as string));
   const pending = pendingUpFiles(applied);
@@ -90,7 +131,7 @@ async function up(): Promise<void> {
     const name = file.replace(/\.up\.sql$/, '');
     console.log(`applying ${name}...`);
     const sql = readFileSync(join(MIGRATIONS_DIR, file), 'utf8');
-    await applyMigrationSql(pool, sql, 'INSERT INTO schema_migrations (name) VALUES ($1)', [name]);
+    await applyMigrationSql(pool, sql, 'INSERT INTO schema_migrations (name, checksum) VALUES ($1, $2)', [name, checksumOf(sql)]);
   }
   console.log(`applied ${pending.length} migration(s).`);
 }
@@ -139,3 +180,7 @@ if (require.main === module) {
     })
     .finally(() => pool.end());
 }
+
+// Exported for the checksum regression test, which drives `up` against a
+// throwaway migrations directory.
+export { up as runUp, verifyAppliedChecksums };

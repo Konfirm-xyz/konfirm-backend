@@ -214,7 +214,9 @@ export class PaymentsService {
 
   // Every status is returned, not just 'paid', so the dashboard can show a
   // held payment with its reason. Totals should count only status = 'paid'.
-  async listForMerchant(merchantId: string) {
+  // Bounded pagination (issue #245): the old hardcoded LIMIT 25 made anything
+  // older unreachable. Defaults keep the previous response shape and size.
+  async listForMerchant(merchantId: string, limit = 25, offset = 0) {
     const { rows } = await pool.query(
       `SELECT p.id, p.muxed_id, p.amount_usdc, p.fee_usdc, p.net_usdc,
               p.asset_code, p.payer_address, p.tx_hash, p.created_at,
@@ -223,9 +225,9 @@ export class PaymentsService {
        FROM payments p
        LEFT JOIN links l ON l.id = p.link_id
        WHERE p.merchant_id = $1
-       ORDER BY p.created_at DESC
-       LIMIT 25`,
-      [merchantId],
+       ORDER BY p.created_at DESC, p.id DESC
+       LIMIT $2 OFFSET $3`,
+      [merchantId, limit, offset],
     );
     return rows;
   }

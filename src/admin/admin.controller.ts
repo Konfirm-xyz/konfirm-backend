@@ -3,6 +3,7 @@ import { ApiBody, ApiCookieAuth, ApiOperation, ApiParam, ApiQuery, ApiResponse, 
 import { z } from 'zod';
 import { ZodValidationPipe } from '../zod-validation.pipe';
 import { parsePaginationInt } from '../common/numeric-validation';
+import { listQuerySchema } from './admin.schemas';
 import { AdminGuard, AuthedAdminRequest } from '../admin-auth/admin-auth.guard';
 import { AdminMerchantsService } from './admin-merchants.service';
 import { AdminActionsService } from './admin-actions.service';
@@ -502,10 +503,12 @@ export class AdminController {
       'Merchant cash-outs Konfirm has observed being started, with the anchor\'s last known status. ' +
       'Admin-visibility only — Konfirm has no authority over the anchor\'s own transaction state.',
   })
+  @ApiQuery({ name: 'limit', required: false, type: 'number' })
+  @ApiQuery({ name: 'offset', required: false, type: 'number' })
   @ApiResponse({ status: 200, description: 'Array of withdrawal attempt records.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  listWithdrawalAttempts() {
-    return this.withdrawalAttempts.list();
+  listWithdrawalAttempts(@Query(new ZodValidationPipe(listQuerySchema)) query: z.infer<typeof listQuerySchema>) {
+    return this.withdrawalAttempts.list(query.limit, query.offset);
   }
 
   // --- x402 settlements ---

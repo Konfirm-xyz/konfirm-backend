@@ -3,4 +3,12 @@
 // SEP-24 anchor transaction statuses that will never change again once
 // reached, so a row in that state is skipped on the next poll and excluded
 // from "still open" counts.
-export const TERMINAL_WITHDRAWAL_STATUSES = ['completed', 'error', 'expired', 'refunded'];
+export const TERMINAL_WITHDRAWAL_STATUSES = [
+  'completed',
+  'error',
+  'expired',
+  'refunded',
+  'no_market',
+  'too_small',
+  'too_large',
+];
