@@ -32,6 +32,16 @@ export function parsePaginationInt(value?: string): number | undefined {
   return Number(value);
 }
 
+// Route params and query strings that end up in a UUID column used to be
+// passed to Postgres as-is: a malformed value (e.g. /links/abc/public) makes
+// the uuid cast throw, which surfaces as a 500 and a Sentry capture instead
+// of a clean 404/400. Callers use this to reject the value before querying.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isUuid(value: unknown): value is string {
+  return typeof value === 'string' && UUID_RE.test(value);
+}
+
 export function nonNegativeDecimalStringSchema(label: string, scale: number, maxScaledValue: bigint) {
   return z
     .string()

@@ -2,6 +2,7 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { pool } from '../db/pool';
 import { getEffectiveFeeBps } from '../common/effective-fee';
 import { owedFee, platformFeeFloor } from '../common/money-rules';
+import { isUuid } from '../common/numeric-validation';
 
 export interface CreateLinkInput {
   merchant_id: string;
@@ -70,6 +71,7 @@ export class LinksService {
   // but belongs to someone else returns 404, not 403 — never confirms to
   // the caller that the id exists at all.
   async deactivate(id: string, merchantId: string) {
+    if (!isUuid(id)) throw new NotFoundException('link not found');
     const { rows } = await pool.query(
       `UPDATE links SET active = false
        WHERE id = $1 AND merchant_id = $2
@@ -84,6 +86,9 @@ export class LinksService {
   // merchant internals, matching the same principle the invoice public
   // projection enforced in the original design.
   async getPublic(id: string) {
+    // A non-UUID id would make Postgres throw on the uuid cast — a raw 500
+    // (and Sentry capture) for what is really just "no such link".
+    if (!isUuid(id)) throw new NotFoundException('link not found');
     const { rows } = await pool.query(
       `SELECT l.id, l.amount_usdc, l.currency, l.description, l.active, l.expires_at,
               m.id AS merchant_id, m.name AS merchant_name, m.stellar_base_address
