@@ -8,6 +8,7 @@ import { getEffectiveFeeBps } from '../common/effective-fee';
 import { platformFeeAddress } from '../common/platform-fee';
 import { feeStroops, fromStroops, platformFeeFloor, toStroops } from '../common/money-rules';
 import { HORIZON_URL, NETWORK_PASSPHRASE } from '../common/stellar-network';
+import { isUuid } from '../common/numeric-validation';
 
 
 @Injectable()
@@ -30,6 +31,9 @@ export class PaymentsService {
   // code's SEP-7 payment-request flow) so a link's active/expiry/amount
   // rules can't drift between them.
   private async loadPayableLink(linkId: string) {
+    // Non-UUID ids would blow up the uuid cast in Postgres (500) rather than
+    // reading as "no such link".
+    if (!isUuid(linkId)) throw new NotFoundException('link not found');
     const linkRes = await pool.query(
       `SELECT l.id, l.amount_usdc, l.currency, l.active, l.expires_at,
               l.reusable, l.max_uses,

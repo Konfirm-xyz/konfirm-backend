@@ -1,6 +1,8 @@
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { PaymentsController } from './payments.controller';
 import { PaymentsService } from './payments.service';
+import { SessionsService } from '../sessions/sessions.service';
+import { SessionsController } from '../sessions/sessions.controller';
 
 describe('PaymentsController.prepareTx', () => {
   const calls: unknown[][] = [];
@@ -28,5 +30,23 @@ describe('PaymentsController.prepareTx', () => {
     const payer = 'GBXBABMFZIJPTOFI6STUXA2FMEXDBB4URBD3VS5XDHKMFHGLJZ5WPQBB';
     await controller.prepareTx('link-1', '123', payer);
     expect(calls).toEqual([['link-1', '123', payer]]);
+  });
+});
+
+// The checkout page's /pay/[linkId] route hits these two endpoints with
+// whatever is in the URL. A non-UUID linkId used to reach Postgres and throw
+// on the uuid cast — a 500 (and Sentry capture) instead of a 404.
+describe('malformed linkId handling', () => {
+  it('SessionsService.reserve 404s for a non-UUID linkId', async () => {
+    await expect(new SessionsService().reserve('not-a-uuid', '123')).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('SessionsService.statusFor 404s for a non-UUID linkId', async () => {
+    await expect(new SessionsService().statusFor('not-a-uuid', '123')).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('SessionsController.status 404s for a non-UUID linkId', async () => {
+    const controller = new SessionsController({} as unknown as SessionsService);
+    await expect(controller.status('not-a-uuid', '123')).rejects.toBeInstanceOf(NotFoundException);
   });
 });

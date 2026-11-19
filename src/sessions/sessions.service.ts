@@ -1,5 +1,6 @@
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { pool } from '../db/pool';
+import { isUuid } from '../common/numeric-validation';
 
 @Injectable()
 export class SessionsService {
@@ -7,6 +8,7 @@ export class SessionsService {
   // says "received" and gives that payment's amount and tx hash. It does not
   // expose status or flags, and it never reveals any other payment.
   async statusFor(linkId: string, muxedId: string) {
+    if (!isUuid(linkId)) throw new NotFoundException('session not found');
     const { rows } = await pool.query(
       `SELECT p.amount_usdc, p.asset_code, p.tx_hash, p.created_at
        FROM link_sessions ls
@@ -38,6 +40,7 @@ export class SessionsService {
   // TODO: the §1 design expects screening at this server round trip in the
   // real build; move or duplicate the check here once that design is settled.
   async reserve(linkId: string, muxedId: string) {
+    if (!isUuid(linkId)) throw new NotFoundException('link not found');
     const link = await pool.query(
       `SELECT id, merchant_id, active FROM links WHERE id = $1`,
       [linkId],
