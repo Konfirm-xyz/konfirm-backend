@@ -13,15 +13,19 @@ const RECENT_POLL_WINDOW_MS = 10_000;
 export class AdminWithdrawalAttemptsService {
   constructor(private readonly withdrawals: WithdrawalsService) {}
 
-  async list() {
+  async list(limit = 50, offset = 0) {
     const { rows } = await pool.query(
       `SELECT wa.id, wa.currency, wa.anchor_tx_id, wa.token, wa.last_status, wa.last_polled_at, wa.created_at,
               m.name AS merchant_name, m.email AS merchant_email
        FROM withdrawal_attempts wa
        JOIN merchants m ON m.id = wa.merchant_id
-       ORDER BY wa.created_at DESC`,
+       ORDER BY wa.created_at DESC
+       LIMIT $1 OFFSET $2`,
+      [limit, offset],
     );
 
+    // Only the page being returned is refreshed — the fan-out is bounded by
+    // the page size, not by the number of stale rows in the whole table.
     const refreshed = await Promise.all(rows.map((row) => this.refreshIfStale(row)));
     // Never leak the anchor session token to the admin UI — it's a bearer
     // credential, not a display field.
