@@ -14,15 +14,15 @@ const paymentRequirementsSchema = z.object({
   amount: z.string(),
   payTo: z.string(),
   maxTimeoutSeconds: z.number(),
-  extra: z.record(z.unknown()).default({}),
+  extra: z.record(z.string(), z.unknown()).default({}),
 });
 
 const paymentPayloadSchema = z.object({
   x402Version: z.number(),
-  resource: z.object({ url: z.string() }).passthrough().optional(),
+  resource: z.looseObject({ url: z.string() }).optional(),
   accepted: paymentRequirementsSchema,
-  payload: z.record(z.unknown()),
-  extensions: z.record(z.unknown()).optional(),
+  payload: z.record(z.string(), z.unknown()),
+  extensions: z.record(z.string(), z.unknown()).optional(),
 });
 
 const x402RequestSchema = z.object({

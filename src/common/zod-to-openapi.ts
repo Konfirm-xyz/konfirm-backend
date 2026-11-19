@@ -18,34 +18,39 @@ import type { SchemaObject } from '@nestjs/swagger/dist/interfaces/open-api-spec
 export type { SchemaObject };
 
 /** Convert a Zod schema to an OpenAPI SchemaObject. */
-export function zodToOpenApi(schema: z.ZodTypeAny): SchemaObject {
+export function zodToOpenApi(schema: z.ZodType): SchemaObject {
   return convert(schema);
 }
 
 // eslint-disable-next-line complexity
-function convert(schema: z.ZodTypeAny): SchemaObject {
+function convert(schema: z.ZodType): SchemaObject {
   if (!schema) return {};
 
   // Unwrap optional/nullable/default wrappers first so the inner type
   // drives the schema shape, and we only add nullable/required hints on top.
   if (schema instanceof z.ZodOptional) {
-    return convert(schema.unwrap());
+    return convert(schema.unwrap() as z.ZodType);
   }
   if (schema instanceof z.ZodNullable) {
-    return { ...convert(schema.unwrap()), nullable: true };
+    return { ...convert(schema.unwrap() as z.ZodType), nullable: true };
   }
   if (schema instanceof z.ZodDefault) {
-    const inner = convert(schema._def.innerType);
-    const defaultValue = schema._def.defaultValue();
-    return { ...inner, default: defaultValue };
+    const inner = convert(schema._zod.def.innerType as z.ZodType);
+    const defaultValue = schema._zod.def.defaultValue;
+    return {
+      ...inner,
+      default: typeof defaultValue === 'function' ? defaultValue() : defaultValue,
+    };
   }
-  if (schema instanceof z.ZodEffects) {
-    // .refine() / .transform() — surface the inner schema shape
-    return convert(schema._def.schema);
+  if (schema instanceof z.ZodPipe) {
+    // .transform() / .pipe() — surface the input schema's shape
+    return convert(schema._zod.def.in as z.ZodType);
   }
-
-  if (schema instanceof z.ZodString) {
-    return buildStringSchema(schema);
+  if (schema instanceof z.ZodCustom) {
+    // .refine() / .superRefine() — surface the inner schema shape
+    return convert(schema._zod.def.innerType as z.ZodType);
+  }
+  if (schema instanceof z.ZodString) {    return buildStringSchema(schema);
   }
   if (schema instanceof z.ZodNumber) {
     return buildNumberSchema(schema);
@@ -56,14 +61,11 @@ function convert(schema: z.ZodTypeAny): SchemaObject {
   if (schema instanceof z.ZodEnum) {
     return { type: 'string', enum: schema.options as string[] };
   }
-  if (schema instanceof z.ZodNativeEnum) {
-    return { type: 'string', enum: Object.values(schema.enum) as string[] };
-  }
   if (schema instanceof z.ZodLiteral) {
     return { type: typeof schema.value as 'string' | 'number' | 'boolean', enum: [schema.value] };
   }
   if (schema instanceof z.ZodArray) {
-    return { type: 'array', items: convert(schema.element) };
+    return { type: 'array', items: convert(schema.element as z.ZodType) };
   }
   if (schema instanceof z.ZodObject) {
     return buildObjectSchema(schema);
@@ -71,14 +73,19 @@ function convert(schema: z.ZodTypeAny): SchemaObject {
   if (schema instanceof z.ZodRecord) {
     return {
       type: 'object',
-      additionalProperties: convert(schema.valueSchema),
+      additionalProperties: convert(schema.valueType as z.ZodType),
     };
   }
   if (schema instanceof z.ZodUnion) {
-    return { oneOf: (schema.options as z.ZodTypeAny[]).map(convert) };
+    return { oneOf: (schema.options as z.ZodType[]).map(convert) };
   }
   if (schema instanceof z.ZodIntersection) {
-    return { allOf: [convert(schema._def.left), convert(schema._def.right)] };
+    return {
+      allOf: [
+        convert(schema._zod.def.left as z.ZodType),
+        convert(schema._zod.def.right as z.ZodType),
+      ],
+    };
   }
   if (schema instanceof z.ZodAny || schema instanceof z.ZodUnknown) {
     return {};
@@ -89,58 +96,69 @@ function convert(schema: z.ZodTypeAny): SchemaObject {
 }
 
 function buildStringSchema(schema: z.ZodString): SchemaObject {
-  const checks = schema._def.checks ?? [];
+  const checks = schema._zod.def.checks ?? [];
   const result: SchemaObject = { type: 'string' };
 
   for (const check of checks) {
-    if (check.kind === 'min') result.minLength = check.value as number;
-    if (check.kind === 'max') result.maxLength = check.value as number;
-    if (check.kind === 'regex') result.pattern = (check.regex as RegExp).source;
-    if (check.kind === 'email') result.format = 'email';
-    if (check.kind === 'url') result.format = 'uri';
-    if (check.kind === 'uuid') result.format = 'uuid';
-    if (check.kind === 'datetime') result.format = 'date-time';
+    const def = check._zod.def as {
+      check?: string;
+      minimum?: number;
+      maximum?: number;
+      pattern?: RegExp;
+      format?: string;
+    };
+    if (def.check === 'min_length') result.minLength = def.minimum as number;
+    if (def.check === 'max_length') result.maxLength = def.maximum as number;
+    if (def.check === 'regex') result.pattern = (def.pattern as RegExp).source;
+    if (def.check === 'string_format') {
+      if (def.format === 'email') result.format = 'email';
+      if (def.format === 'url') result.format = 'uri';
+      if (def.format === 'uuid') result.format = 'uuid';
+      if (def.format === 'datetime') result.format = 'date-time';
+    }
   }
 
   return result;
 }
 
 function buildNumberSchema(schema: z.ZodNumber): SchemaObject {
-  const checks = schema._def.checks ?? [];
+  const checks = schema._zod.def.checks ?? [];
   const result: SchemaObject = { type: 'number' };
 
   for (const check of checks) {
-    if (check.kind === 'min') {
-      result.minimum = check.value as number;
+    const def = check._zod.def as {
+      check?: string;
+      minimum?: number;
+      maximum?: number;
+      inclusive?: boolean;
+    };
+    if (def.check === 'greater_than') {
+      result.minimum = def.minimum as number;
       // OAS 3.0's SchemaObject (what @nestjs/swagger types against) models
       // exclusive bounds as a boolean flag alongside `minimum`/`maximum`,
       // not as the OAS 3.1 style of the bound itself replacing the flag --
       // `minimum` above already carries the value either way.
-      if (check.inclusive === false) result.exclusiveMinimum = true;
+      if (def.inclusive === false) result.exclusiveMinimum = true;
     }
-    if (check.kind === 'max') {
-      result.maximum = check.value as number;
-      if (check.inclusive === false) result.exclusiveMaximum = true;
+    if (def.check === 'less_than') {
+      result.maximum = def.maximum as number;
+      if (def.inclusive === false) result.exclusiveMaximum = true;
     }
-    if (check.kind === 'int') result.type = 'integer';
+    if (def.check === 'number_format' && def.format === 'safeint') result.type = 'integer';
   }
 
   return result;
 }
 
-function buildObjectSchema(schema: z.ZodObject<z.ZodRawShape>): SchemaObject {
-  const shape = schema.shape as z.ZodRawShape;
+function buildObjectSchema(schema: z.ZodObject): SchemaObject {
+  const shape = schema.shape as Record<string, z.ZodType>;
   const properties: Record<string, SchemaObject> = {};
   const required: string[] = [];
 
   for (const [key, value] of Object.entries(shape)) {
-    properties[key] = convert(value as z.ZodTypeAny);
+    properties[key] = convert(value);
     // A field is required unless it is ZodOptional or has a ZodDefault.
-    const unwrapped = value as z.ZodTypeAny;
-    if (
-      !(unwrapped instanceof z.ZodOptional) &&
-      !(unwrapped instanceof z.ZodDefault)
-    ) {
+    if (!(value instanceof z.ZodOptional) && !(value instanceof z.ZodDefault)) {
       required.push(key);
     }
   }
@@ -157,7 +175,7 @@ function buildObjectSchema(schema: z.ZodObject<z.ZodRawShape>): SchemaObject {
  *   @ApiBody(zodBody(mySchema, 'MyRequest'))
  */
 export function zodBody(
-  schema: z.ZodTypeAny,
+  schema: z.ZodType,
   description?: string,
 ): { schema: SchemaObject; description?: string } {
   return { schema: zodToOpenApi(schema), ...(description ? { description } : {}) };
