@@ -252,5 +252,3 @@ export class PaymentsService {
     return { pending: rows.length > 0, since: rows[0]?.created_at ?? null };
   }
 }
-
-   
