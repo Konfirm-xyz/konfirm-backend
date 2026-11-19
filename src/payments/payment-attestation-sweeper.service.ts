@@ -12,6 +12,10 @@ import { PaymentAttestationService } from './payment-attestation.service';
 // exactly one real on-chain checkpoint landed).
 const ATTESTATION_LOCK_KEY = 402_004;
 const BATCH_SIZE = 20;
+// A claim older than this is treated as abandoned (process died mid-attest)
+// and retried. Long enough to cover a slow Soroban submission, short enough
+// that a crashed sweep doesn't strand a payment for long.
+const CLAIM_STALE_AFTER = '15 minutes';
 
 interface AttestationDueRow {
   id: string;
@@ -62,9 +66,10 @@ export class PaymentAttestationSweeperService {
        FROM payments p
        JOIN merchants m ON m.id = p.merchant_id
        WHERE p.status = 'paid' AND p.attested_at IS NULL
+         AND (p.attestation_claimed_at IS NULL OR p.attestation_claimed_at < NOW() - $2::interval)
        ORDER BY p.created_at ASC
        LIMIT $1`,
-      [BATCH_SIZE],
+      [BATCH_SIZE, CLAIM_STALE_AFTER],
     );
 
     for (const row of rows) {
@@ -80,6 +85,22 @@ export class PaymentAttestationSweeperService {
       }
 
       try {
+        // Claim the row *before* the on-chain call. If the write-back below
+        // fails after a successful attest(), the claim stays set, so the next
+        // sweep skips this row instead of submitting a second on-chain
+        // record_payment for the same payment. Only a claim older than
+        // CLAIM_STALE_AFTER is retried.
+        const claim = await pool.query(
+          `UPDATE payments SET attestation_claimed_at = NOW()
+           WHERE id = $1 AND attested_at IS NULL
+             AND (attestation_claimed_at IS NULL OR attestation_claimed_at < NOW() - $2::interval)`,
+          [row.id, CLAIM_STALE_AFTER],
+        );
+        if (claim.rowCount === 0) {
+          // Another sweep claimed it first.
+          continue;
+        }
+
         const result = await this.attestation.attest({
           merchantAddress: row.merchant_address,
           payerAddress: row.payer_address,
@@ -90,18 +111,27 @@ export class PaymentAttestationSweeperService {
 
         if (!result.success) {
           this.logger.warn(`attestation failed for payment ${row.id}: ${result.errorReason}`);
+          // Release the claim so the next sweep retries promptly rather than
+          // waiting out CLAIM_STALE_AFTER.
+          await pool.query(`UPDATE payments SET attestation_claimed_at = NULL WHERE id = $1 AND attested_at IS NULL`, [
+            row.id,
+          ]);
           continue;
         }
 
         await pool.query(
-          `UPDATE payments SET onchain_payment_id = $2, attested_at = NOW() WHERE id = $1 AND attested_at IS NULL`,
+          `UPDATE payments SET onchain_payment_id = $2, attested_at = NOW(), attestation_claimed_at = NULL
+           WHERE id = $1 AND attested_at IS NULL`,
           [row.id, result.onchainPaymentId],
         );
       } catch (err) {
         // One row's failure -- attestation or the write-back after it --
         // must never abort the rest of the batch. Left unattested; the
         // next sweep retries it, same self-healing shape as every other
-        // sweeper in this codebase.
+        // sweeper in this codebase. The claim set above is deliberately
+        // *not* cleared here: if the failure came after a successful
+        // on-chain attest(), retrying immediately would submit a duplicate
+        // record_payment. The stale-claim window bounds the wait instead.
         this.logger.error(`attestation errored for payment ${row.id}: ${err}`);
       }
     }

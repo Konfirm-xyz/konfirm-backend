@@ -1,4 +1,6 @@
 import { PaymentAttestationService } from './payment-attestation.service';
+import { PaymentAttestationSweeperService } from './payment-attestation-sweeper.service';
+import { pool } from '../db/pool';
 import * as facilitatorSigner from '../common/facilitator-signer';
 import { toStroops } from '../common/money-rules';
 import { Client } from '@stellar/stellar-sdk/contract';
@@ -24,6 +26,8 @@ jest.mock('@stellar/stellar-sdk/contract', () => {
     },
   };
 });
+
+jest.mock('../db/pool', () => ({ pool: { query: jest.fn(), connect: jest.fn() } }));
 
 jest.mock('../common/facilitator-signer', () => ({
   getFacilitatorSigner: jest.fn(),
@@ -269,5 +273,90 @@ describe('PaymentAttestationService', () => {
     });
 
     expect(Client.from).toHaveBeenCalledTimes(1);
+  });
+});
+
+// #67: attest-then-write-back must be idempotent. A DB failure between a
+// successful on-chain attest() and the local write-back must not let the next
+// sweep submit a second on-chain record_payment for the same payment.
+describe('PaymentAttestationSweeperService', () => {
+  const dueRow = {
+    id: 'pay-1',
+    payer_address: 'GDIET4T37N35XU4FY52RMR4Z653WYFITEHGIJXN4VEQTDYR5JSURJDPL',
+    muxed_id: '42',
+    net_usdc: '5.00',
+    tx_hash: '0011223344556677',
+    merchant_address: 'GBXBABMFZIJPTOFI6STUXA2FMEXDBB4URBD3VS5XDHKMFHGLJZ5WPQBB',
+  };
+
+  // Minimal in-memory stand-in for the payments table, honouring exactly the
+  // predicates the sweeper's SQL relies on (attested_at IS NULL, claim
+  // freshness) so the second sweep sees what a real Postgres would.
+  function makeFakePool() {
+    const state = { attestedAt: null as Date | null, claimedAt: null as Date | null };
+    const query = jest.fn(async (sql: string, params: unknown[] = []) => {
+      if (sql.includes('FROM payments p')) {
+        const due = state.attestedAt === null && state.claimedAt === null;
+        return { rows: due ? [dueRow] : [] };
+      }
+      if (sql.includes('SET attestation_claimed_at = NOW()')) {
+        if (state.attestedAt !== null || state.claimedAt !== null) return { rows: [], rowCount: 0 };
+        state.claimedAt = new Date();
+        return { rows: [], rowCount: 1 };
+      }
+      if (sql.includes('SET onchain_payment_id')) {
+        if (state.attestedAt !== null) return { rows: [], rowCount: 0 };
+        state.attestedAt = new Date();
+        state.claimedAt = null;
+        return { rows: [], rowCount: 1 };
+      }
+      if (sql.includes('SET attestation_claimed_at = NULL')) {
+        state.claimedAt = null;
+        return { rows: [], rowCount: 1 };
+      }
+      throw new Error(`unexpected query: ${sql} ${params.length}`);
+    });
+    return { state, query };
+  }
+
+  it('does not call attest() again on the next sweep when the write-back throws after a successful attest()', async () => {
+    const fake = makeFakePool();
+    const realQuery = fake.query;
+    let writeBackAttempts = 0;
+    fake.query = jest.fn(async (sql: string, params?: unknown[]) => {
+      if (sql.includes('SET onchain_payment_id')) {
+        writeBackAttempts += 1;
+        throw new Error('connection reset');
+      }
+      return realQuery(sql, params);
+    }) as typeof realQuery;
+    (pool as unknown as { query: unknown }).query = fake.query;
+
+    const attest = jest.fn().mockResolvedValue({ success: true, onchainPaymentId: '7', transaction: 'deadbeef' });
+    const sweeper = new PaymentAttestationSweeperService({ attest } as unknown as PaymentAttestationService);
+
+    await (sweeper as unknown as { doSweep(): Promise<void> }).doSweep();
+    expect(attest).toHaveBeenCalledTimes(1);
+    expect(writeBackAttempts).toBe(1);
+
+    // Next sweep: the row is still unattested, but its claim is fresh, so it
+    // must not be picked up -- no second on-chain record_payment.
+    await (sweeper as unknown as { doSweep(): Promise<void> }).doSweep();
+    expect(attest).toHaveBeenCalledTimes(1);
+  });
+
+  it('releases the claim when attest() itself fails, so the next sweep retries', async () => {
+    const fake = makeFakePool();
+    (pool as unknown as { query: unknown }).query = fake.query;
+
+    const attest = jest.fn().mockResolvedValue({ success: false, errorReason: 'attestation_failed' });
+    const sweeper = new PaymentAttestationSweeperService({ attest } as unknown as PaymentAttestationService);
+
+    await (sweeper as unknown as { doSweep(): Promise<void> }).doSweep();
+    expect(attest).toHaveBeenCalledTimes(1);
+    expect(fake.state.claimedAt).toBeNull();
+
+    await (sweeper as unknown as { doSweep(): Promise<void> }).doSweep();
+    expect(attest).toHaveBeenCalledTimes(2);
   });
 });
