@@ -93,6 +93,14 @@ export class PaymentAttestationService {
   }
 
   async attest(input: AttestPaymentInput): Promise<AttestPaymentResult> {
+    // Buffer.from(hex, 'hex') silently truncates at the first non-hex
+    // character, so a malformed hash would be written permanently on-chain
+    // as a wrong (short) value. Reject it before any contract call.
+    if (!/^[0-9a-f]{64}$/i.test(input.txHash)) {
+      this.logger.warn(`attestation rejected: malformed tx_hash`);
+      return { success: false, errorReason: 'invalid_tx_hash' };
+    }
+
     // Exact bigint stroops via the shared converter -- never a float
     // multiply-then-round, which silently loses precision above ~900,719
     // USDC (Number.MAX_SAFE_INTEGER boundary) and would be recorded
