@@ -3,7 +3,7 @@ import { ApiBody, ApiCookieAuth, ApiOperation, ApiParam, ApiQuery, ApiResponse, 
 import { z } from 'zod';
 import { ZodValidationPipe } from '../zod-validation.pipe';
 import { parsePaginationInt } from '../common/numeric-validation';
-import { AdminGuard, AuthedAdminRequest } from '../admin-auth/admin-auth.guard';
+import { AdminGuard, AdminRoles, AuthedAdminRequest } from '../admin-auth/admin-auth.guard';
 import { AdminMerchantsService } from './admin-merchants.service';
 import { AdminActionsService } from './admin-actions.service';
 import { AdminStatsService } from './admin-stats.service';
@@ -413,6 +413,7 @@ export class AdminController {
   // --- Compliance ---
 
   @Get('compliance/blocked-addresses')
+  @AdminRoles('superadmin')
   @ApiOperation({ summary: 'List blocked Stellar addresses', description: 'The admin-managed compliance blocklist.' })
   @ApiResponse({ status: 200, description: 'Array of blocked address records.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
@@ -421,6 +422,7 @@ export class AdminController {
   }
 
   @Post('compliance/blocked-addresses')
+  @AdminRoles('superadmin')
   @ApiOperation({
     summary: 'Block a Stellar address',
     description: 'Adds a Stellar address to the blocklist. Logged to admin_actions.',
@@ -440,6 +442,7 @@ export class AdminController {
   }
 
   @Delete('compliance/blocked-addresses/:id')
+  @AdminRoles('superadmin')
   @ApiOperation({
     summary: 'Unblock a Stellar address',
     description: 'Removes a Stellar address from the blocklist. Logged to admin_actions.',
@@ -564,6 +567,7 @@ export class AdminController {
   // --- Treasury ---
 
   @Get('treasury/status')
+  @AdminRoles('superadmin')
   @ApiOperation({ summary: 'Get treasury contract state', description: 'Treasury contract state and balances.' })
   @ApiResponse({ status: 200, description: 'Treasury status object.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
@@ -695,6 +699,7 @@ export class AdminController {
   // (a compromised but still-legitimate signing process, not a leaked key).
 
   @Get('facilitator/status')
+  @AdminRoles('superadmin')
   @ApiOperation({
     summary: 'Facilitator spend-guard status',
     description: 'Returns today\'s facilitator spend against the cap, and whether signing is currently halted.',
@@ -706,6 +711,7 @@ export class AdminController {
   }
 
   @Post('facilitator/resume')
+  @AdminRoles('superadmin')
   @ApiOperation({
     summary: 'Resume facilitator signing after a halt',
     description:

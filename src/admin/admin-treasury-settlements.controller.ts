@@ -2,7 +2,7 @@ import { BadRequestException, Body, Controller, Get, NotFoundException, Param, P
 import { ApiBody, ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { z } from 'zod';
-import { AdminGuard, AuthedAdminRequest } from '../admin-auth/admin-auth.guard';
+import { AdminGuard, AdminRoles, AuthedAdminRequest } from '../admin-auth/admin-auth.guard';
 import { ZodValidationPipe } from '../zod-validation.pipe';
 import { zodBody } from '../common/zod-to-openapi';
 import { AdminActionsService } from './admin-actions.service';
@@ -54,6 +54,7 @@ function parseSettlementId(raw: string): bigint {
 @ApiTags('admin-treasury-settlements')
 @Controller('admin/treasury/settlements')
 @UseGuards(AdminGuard)
+@AdminRoles('superadmin')
 export class AdminTreasurySettlementsController {
   constructor(
     private readonly settlements: AdminTreasurySettlementsService,

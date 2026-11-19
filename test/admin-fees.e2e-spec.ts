@@ -71,3 +71,93 @@ describe('GET /admin/fees/owed (e2e)', () => {
     expect(res.body.length).toBeLessThanOrEqual(1);
   });
 });
+
+// Role scoping: `support` admins keep merchant/payment access but are blocked
+// from compliance, treasury, treasury-settlements, and facilitator routes.
+describe('admin role scoping (e2e)', () => {
+  let app: INestApplication;
+  const stamp = Date.now();
+  const supportEmail = `admin-support-e2e-${stamp}@example.com`;
+  const superEmail = `admin-super-e2e-${stamp}@example.com`;
+  const password = 'a-role-scoped-password-0';
+  let supportCookie: string;
+  let superCookie: string;
+
+  beforeAll(async () => {
+    const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+    app = moduleRef.createNestApplication();
+    app.use(cookieParser());
+    await app.init();
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    await pool.query('INSERT INTO admins (email, password_hash, name, role) VALUES ($1, $2, $3, $4)', [
+      supportEmail,
+      passwordHash,
+      'Support Admin',
+      'support',
+    ]);
+    await pool.query('INSERT INTO admins (email, password_hash, name, role) VALUES ($1, $2, $3, $4)', [
+      superEmail,
+      passwordHash,
+      'Super Admin',
+      'superadmin',
+    ]);
+
+    const supportLogin = await request(app.getHttpServer())
+      .post('/admin/auth/login')
+      .send({ email: supportEmail, password })
+      .expect(200);
+    supportCookie = supportLogin.headers['set-cookie'][0].split(';')[0];
+
+    const superLogin = await request(app.getHttpServer())
+      .post('/admin/auth/login')
+      .send({ email: superEmail, password })
+      .expect(200);
+    superCookie = superLogin.headers['set-cookie'][0].split(';')[0];
+  });
+
+  afterAll(async () => {
+    await pool.query('DELETE FROM admin_actions WHERE admin_id IN (SELECT id FROM admins WHERE email = ANY($1))', [
+      [supportEmail, superEmail],
+    ]);
+    await pool.query('DELETE FROM admins WHERE email = ANY($1)', [[supportEmail, superEmail]]);
+    await app.close();
+    await pool.end();
+  });
+
+  it('blocks a support admin from compliance routes', async () => {
+    await request(app.getHttpServer())
+      .get('/admin/compliance/blocked-addresses')
+      .set('Cookie', supportCookie)
+      .expect(401);
+    await request(app.getHttpServer())
+      .post('/admin/compliance/blocked-addresses')
+      .set('Cookie', supportCookie)
+      .send({ stellar_address: 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF', reason: 'role test' })
+      .expect(401);
+    await request(app.getHttpServer())
+      .delete('/admin/compliance/blocked-addresses/00000000-0000-0000-0000-000000000000')
+      .set('Cookie', supportCookie)
+      .expect(401);
+  });
+
+  it('blocks a support admin from treasury, treasury-settlements, and facilitator routes', async () => {
+    await request(app.getHttpServer()).get('/admin/treasury/status').set('Cookie', supportCookie).expect(401);
+    await request(app.getHttpServer()).get('/admin/treasury/settlements').set('Cookie', supportCookie).expect(401);
+    await request(app.getHttpServer()).get('/admin/facilitator/status').set('Cookie', supportCookie).expect(401);
+    await request(app.getHttpServer()).post('/admin/facilitator/resume').set('Cookie', supportCookie).expect(401);
+  });
+
+  it('still lets a support admin reach merchant and payment routes', async () => {
+    await request(app.getHttpServer()).get('/admin/merchants').set('Cookie', supportCookie).expect(200);
+    await request(app.getHttpServer()).get('/admin/payments').set('Cookie', supportCookie).expect(200);
+  });
+
+  it('lets a superadmin reach the scoped routes', async () => {
+    await request(app.getHttpServer())
+      .get('/admin/compliance/blocked-addresses')
+      .set('Cookie', superCookie)
+      .expect(200);
+    await request(app.getHttpServer()).get('/admin/facilitator/status').set('Cookie', superCookie).expect(200);
+  });
+});
