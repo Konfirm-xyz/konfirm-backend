@@ -77,7 +77,11 @@ export class X402Service implements OnModuleInit {
       await pool.query(
         `INSERT INTO x402_settlements (payer_address, pay_to, asset_contract, amount, resource_url, status, tx_hash, idempotency_key)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         ON CONFLICT (idempotency_key) DO NOTHING`,
+         ON CONFLICT (idempotency_key) DO UPDATE
+           SET status = EXCLUDED.status,
+               tx_hash = EXCLUDED.tx_hash,
+               updated_at = NOW()
+           WHERE x402_settlements.status != 'settled'`,
         [
           params.payer,
           params.requirements.payTo,
