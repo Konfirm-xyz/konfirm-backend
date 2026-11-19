@@ -57,6 +57,11 @@ const resetPasswordSchema = z.object({
 // Tighter limit for flows that send email (same ceiling as forgot-password).
 const EMAIL_CHANGE_THROTTLE = { default: { limit: 5, ttl: 60_000 } };
 
+const changePasswordSchema = z.object({
+  current_password: z.string().min(1),
+  new_password: passwordSchema,
+});
+
 const updateNameSchema = z.object({
   name: z.string().min(1).max(200),
 });
@@ -525,6 +530,39 @@ export class AuthController {
       req.merchant.id,
       body.current_password,
       body.stellar_base_address,
+    );
+    this.setSessionCookie(res, token);
+    return { merchant };
+  }
+
+  // Self-service rotation for a merchant who can still log in — no reset
+  // email loop. Mirrors the admin-side POST /admin/auth/change-password.
+  @Post('change-password')
+  @HttpCode(200)
+  @UseGuards(AuthGuard)
+  @Throttle(AUTH_THROTTLE)
+  @ApiCookieAuth('merchant-session')
+  @ApiOperation({
+    summary: 'Change own merchant password',
+    description:
+      'Requires the current password. Signs out every other session for this merchant (bumps session_version) and ' +
+      'issues a fresh cookie for this one. Rate-limited to 10 req/min per IP.',
+  })
+  @ApiBody(zodBody(changePasswordSchema, 'Change password request'))
+  @ApiResponse({ status: 200, description: 'Password changed. A new konfirm_session cookie is set.' })
+  @ApiResponse({ status: 400, description: 'Current password is incorrect, or the new password is invalid or unchanged.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated.' })
+  @ApiResponse({ status: 403, description: 'Team member sessions cannot change the owner password.' })
+  async changePassword(
+    @Body(new ZodValidationPipe(changePasswordSchema)) body: z.infer<typeof changePasswordSchema>,
+    @Req() req: AuthedRequest,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const { token, merchant } = await this.auth.changePassword(
+      req.merchant.id,
+      body.current_password,
+      body.new_password,
+      req.merchant.member_id,
     );
     this.setSessionCookie(res, token);
     return { merchant };
