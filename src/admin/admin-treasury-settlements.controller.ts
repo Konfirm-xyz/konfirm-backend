@@ -119,7 +119,7 @@ export class AdminTreasurySettlementsController {
       'returns.',
   })
   @ApiBody(zodBody(proposeSchema, 'Proposer address, merchant address, and amount'))
-  @ApiResponse({ status: 200 | 201, description: '{ build_token, unsigned_xdr, network_passphrase, tx_hash }.' })
+  @ApiResponse({ status: 200, description: '{ build_token, unsigned_xdr, network_passphrase, tx_hash }.' })
   @ApiResponse({ status: 400, description: 'Invalid input or simulation failed.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
   async propose(
@@ -144,7 +144,7 @@ export class AdminTreasurySettlementsController {
   })
   @ApiParam({ name: 'id', description: 'on-chain settlement id', type: 'string' })
   @ApiBody(zodBody(approveSchema, 'Signer address'))
-  @ApiResponse({ status: 200 | 201, description: '{ build_token, unsigned_xdr, network_passphrase, tx_hash }.' })
+  @ApiResponse({ status: 200, description: '{ build_token, unsigned_xdr, network_passphrase, tx_hash }.' })
   @ApiResponse({ status: 400, description: 'Invalid input or simulation failed.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
   async approve(
@@ -169,7 +169,7 @@ export class AdminTreasurySettlementsController {
   })
   @ApiParam({ name: 'id', description: 'on-chain settlement id', type: 'string' })
   @ApiBody(zodBody(executeSchema, 'Caller (signer) address'))
-  @ApiResponse({ status: 200 | 201, description: '{ build_token, unsigned_xdr, network_passphrase, tx_hash }.' })
+  @ApiResponse({ status: 200, description: '{ build_token, unsigned_xdr, network_passphrase, tx_hash }.' })
   @ApiResponse({ status: 400, description: 'Invalid input or simulation failed.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
   async execute(
@@ -196,7 +196,7 @@ export class AdminTreasurySettlementsController {
       'the client claims.',
   })
   @ApiBody(zodBody(submitSchema, 'Signed XDR and the build_token returned by propose/approve/execute'))
-  @ApiResponse({ status: 200 | 201, description: 'The freshly-synced settlement record, plus tx_hash.' })
+  @ApiResponse({ status: 200, description: 'The freshly-synced settlement record, plus tx_hash.' })
   @ApiResponse({ status: 400, description: 'Hash mismatch, malformed XDR, or the network rejected it.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
   @ApiResponse({ status: 404, description: 'build_token not found.' })
