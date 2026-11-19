@@ -72,9 +72,20 @@ These issues have been fixed in the code:
 ### #118: GitHub Actions Security
 - **Status**: ✓ Fixed  
 - **Changes**:
-  - Pinned `actions/checkout@v4` to commit SHA: `11d59607cc989b6c31a8b6f5ee0e3ad0e9a6b297`
-  - Pinned `actions/setup-node@v4` to commit SHA: `39370e3970a6d050c480ffad4ff0ed4d3fdee5cb`
+  - Pinned `actions/checkout@v4.2.2` to commit SHA: `11bd71901bbe5b1630ceea73d27597364c9af683`
+  - Pinned `actions/setup-node@v4.1.0` to commit SHA: `39370e3970a6d050c480ffad4ff0ed4d3fdee5af`
   - Actions are now immutable and auditable
+
+**Verification**: the SHAs above are the real tag SHAs, fetched from GitHub's API, and match the pins in `.github/workflows/ci.yml`:
+
+```
+$ gh api repos/actions/checkout/git/refs/tags/v4.2.2 --jq '.object.sha'
+11bd71901bbe5b1630ceea73d27597364c9af683
+$ gh api repos/actions/setup-node/git/refs/tags/v4.1.0 --jq '.object.sha'
+39370e3970a6d050c480ffad4ff0ed4d3fdee5af
+```
+
+To re-verify at any time, run the two commands above and compare against the `uses:` lines in `.github/workflows/ci.yml`.
   
 **Note**: Repository-level GitHub Actions permissions (`allowed_actions: "selected"`) must still be configured via Settings → Code security and analysis → GitHub Actions → Permissions (see issue #118 for details).
 
