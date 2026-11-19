@@ -4,6 +4,7 @@ import {
   Address,
   BASE_FEE,
   Contract,
+  Keypair,
   Networks,
   Transaction,
   TransactionBuilder,
@@ -487,6 +488,63 @@ export class ChannelService {
       [new Address(signer.address).toScVal(), nativeToScVal(onchainChannelId, { type: 'u64' })],
       'initiate_close',
     );
+  }
+
+  // backend#191: the channel contract rejects open_channel for any token
+  // that was never allowlisted via set_token_allowed, and nothing in this
+  // backend ever called it — so every real open_channel failed with
+  // TokenNotAllowed after a fresh deploy. set_token_allowed requires the
+  // contract admin's auth (the deployer), which the facilitator is not, so
+  // this builds the call with the deployer as source and lets Soroban's
+  // source-account authorization shortcut cover the admin require_auth().
+  // The deployer key is only read here, never cached or logged.
+  async setTokenAllowed(tokenAddress: string, allowed: boolean): Promise<FacilitatorCallResult> {
+    const secret = process.env.STELLAR_DEPLOYER_SECRET_KEY;
+    if (!secret) {
+      return { success: false, errorReason: 'deployer_key_not_configured' };
+    }
+    const server = new rpc.Server(RPC_URL);
+    const deployer = Keypair.fromSecret(secret);
+    const contract = new Contract(CHANNEL_CONTRACT_ID);
+    const args = [new Address(tokenAddress).toScVal(), nativeToScVal(allowed, { type: 'bool' })];
+
+    return withFacilitatorSubmissionLock(async (): Promise<FacilitatorCallResult> => {
+      let sentHash: string;
+      try {
+        const account = await server.getAccount(deployer.publicKey());
+        const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK_PASSPHRASE })
+          .setTimeout(60)
+          .addOperation(contract.call('set_token_allowed', ...args))
+          .build();
+
+        const sim = await server.simulateTransaction(tx);
+        if (!rpc.Api.isSimulationSuccess(sim)) {
+          return { success: false, errorReason: 'set_token_allowed_simulation_failed' };
+        }
+        // assembleTransaction keeps the simulation's auth entries — the
+        // admin require_auth() entry included — see submitFacilitatorCall.
+        const prepared = rpc.assembleTransaction(tx, sim).build();
+        prepared.sign(deployer);
+
+        const sendResult = await server.sendTransaction(prepared);
+        if (sendResult.status !== 'PENDING') {
+          return { success: false, errorReason: 'set_token_allowed_submission_failed' };
+        }
+        sentHash = sendResult.hash;
+      } catch (err) {
+        this.logger.error(`set_token_allowed failed: ${err}`);
+        return { success: false, errorReason: 'set_token_allowed_failed' };
+      }
+
+      const confirmed = await this.pollForTransaction(server, sentHash);
+      if (!confirmed.success) {
+        const errorReason = confirmed.timedOut
+          ? 'set_token_allowed_confirmation_timeout'
+          : 'set_token_allowed_transaction_failed';
+        return { success: false, errorReason, transaction: sentHash };
+      }
+      return { success: true, transaction: sentHash, returnValue: confirmed.returnValue };
+    });
   }
 
   async getChannelInfoOnChain(onchainChannelId: bigint): Promise<unknown> {

@@ -546,6 +546,25 @@ export class AdminController {
     return this.blockchain.status();
   }
 
+  // backend#191: allowlist every token the backend's own config expects
+  // (USDC, EURC, XLM) on the deployed channel contract, so real
+  // open_channel calls stop failing with TokenNotAllowed after a fresh
+  // deploy + initialize. Idempotent — re-running it is harmless.
+  @Post('blockchain/channel/allowlist-tokens')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Allowlist channel tokens',
+    description:
+      'Calls set_token_allowed(true) on the deployed channel contract for every token in the backend config ' +
+      '(USDC, EURC, XLM). Requires STELLAR_DEPLOYER_SECRET_KEY (the contract admin). Run once after a fresh ' +
+      'deploy + initialize; safe to re-run.',
+  })
+  @ApiResponse({ status: 200, description: 'Per-token result with transaction hash or error reason.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
+  allowlistChannelTokens() {
+    return this.blockchain.allowlistChannelTokens();
+  }
+
   // --- Notifications ---
 
   @Get('notifications')
