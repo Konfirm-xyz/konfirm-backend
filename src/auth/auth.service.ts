@@ -87,6 +87,7 @@ export class AuthService {
     referralCode?: string,
   ): Promise<{ token: string; merchant: MerchantClaims; status: string }> {
     email = normalizeEmail(email);
+    name = name.trim();
     const existing = await pool.query('SELECT id FROM merchants WHERE email = $1', [email]);
     if (existing.rows.length > 0) {
       throw new ConflictException('an account with this email already exists');

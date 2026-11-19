@@ -15,6 +15,10 @@ interface PaymentContract {
     args: { merchant: string; payer: string; link_id: bigint; amount: bigint; tx_hash: Buffer },
     options?: MethodOptions,
   ): Promise<AssembledTransaction<Result<bigint>>>;
+  // Read-only: true once the payment has been voided on-chain. Simulated
+  // only (never signed or submitted), same shape as onchain-compliance.ts's
+  // is_allowed.
+  is_voided(args: { payment_id: bigint }, options?: MethodOptions): Promise<AssembledTransaction<boolean>>;
 }
 
 export interface AttestPaymentInput {
@@ -90,6 +94,21 @@ export class PaymentAttestationService {
       })();
     }
     return this.clientPromise;
+  }
+
+  // On-chain void reconciliation (issue #189). Fails closed (returns false)
+  // on any error: a transient RPC failure must never flip a real payment to
+  // 'voided' -- the next sweep retries it instead.
+  async isVoided(onchainPaymentId: string): Promise<boolean> {
+    try {
+      const client = await this.getClient();
+      const tx = await client.is_voided({ payment_id: BigInt(onchainPaymentId) });
+      return tx.result === true;
+    } catch (err) {
+      this.logger.warn(`is_voided check failed for on-chain payment ${onchainPaymentId}: ${err}`);
+      this.clientPromise = null;
+      return false;
+    }
   }
 
   async attest(input: AttestPaymentInput): Promise<AttestPaymentResult> {
