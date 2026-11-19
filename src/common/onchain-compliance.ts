@@ -80,10 +80,11 @@ export interface ComplianceCanaryResult {
   // canary configured isn't a breach — it just means this check can't run
   // yet (see docs/specs/03-deployer-admin.md for the seeding step).
   configured: boolean;
-  // Null when not configured. True means the canary is behaving as
-  // expected (blocked); false is the actual breach signal (backend#210) —
-  // a contract that's silently uninitialized, pointed at the wrong
-  // contract ID, or had its canary accidentally cleared.
+  // Null when not configured, or when the probe itself couldn't run (RPC
+  // unreachable) — "unknown", not a breach. True means the canary is
+  // behaving as expected (blocked); false is the actual breach signal
+  // (backend#210) — a contract that's silently uninitialized, pointed at
+  // the wrong contract ID, or had its canary accidentally cleared.
   ok: boolean | null;
 }
 
@@ -100,16 +101,38 @@ export interface ComplianceCanaryResult {
 // If it ever reads back as allowed, something is wrong with compliance
 // screening itself, independent of any one payment's outcome.
 //
-// Deliberately reuses isAllowedOnChain rather than a bespoke client call:
-// an RPC outage already fails open there (loudly, via the existing
-// console.warn) and would make this read back as "canary cleared" too —
-// an indistinguishable false alarm during a real RPC outage is the
-// intentional, safer failure mode here, not a bug to route around.
+// Deliberately does *not* reuse isAllowedOnChain: that helper fails open
+// (returns true) on any RPC error, which would make a plain outage read
+// back as "canary cleared" — an indistinguishable false alarm during a real
+// RPC outage. The probe below is its own call so a failure can be reported
+// as "unknown" (ok: null) instead, keeping the breach signal (ok: false)
+// distinct from both the RPC-failure fail-open path and a healthy read.
 export async function checkComplianceCanary(): Promise<ComplianceCanaryResult> {
   if (!COMPLIANCE_CANARY_ADDRESS) {
     return { configured: false, ok: null };
   }
-  const allowed = await isAllowedOnChain(COMPLIANCE_CANARY_ADDRESS);
+  // Probed directly rather than through isAllowedOnChain(): that helper
+  // fails open (returns true) on any RPC error, which would make a plain
+  // outage read back as "canary cleared" — exactly the false alarm this
+  // check must not raise. Here a thrown error means "couldn't tell", which
+  // is reported as ok: null (unknown), distinct from both the healthy
+  // ok: true and the breach ok: false.
+  let allowed: boolean;
+  try {
+    const tx = await withRetry(
+      async () => {
+        const client = await getClient();
+        return client.is_allowed({ addr: COMPLIANCE_CANARY_ADDRESS as string });
+      },
+      { retries: 1, baseDelayMs: 500, timeoutMs: 8_000 },
+    );
+    allowed = tx.result;
+  } catch (err) {
+    clientPromise = null;
+    // eslint-disable-next-line no-console
+    console.warn('[compliance] canary probe unreachable, cannot tell whether screening is running:', err);
+    return { configured: true, ok: null };
+  }
   if (allowed) {
     // Distinct from the RPC-fail-open warning above: this is the "screening
     // itself may not be running" alarm backend#210 asks for, not a transient
