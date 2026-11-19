@@ -71,15 +71,17 @@ export class AdminNotificationsService {
   }
 
   private async settlementFailures(): Promise<AdminNotification[]> {
-    const { rows } = await pool.query<{ id: string; error: string | null; created_at: string }>(
-      `SELECT id, error, created_at FROM x402_settlements WHERE status = 'failed' ORDER BY created_at DESC LIMIT 50`,
+    const { rows } = await pool.query<{ id: string; payer_address: string; amount: string; created_at: string }>(
+      `SELECT id, payer_address, amount, created_at FROM x402_settlements WHERE status = 'failed' ORDER BY created_at DESC LIMIT 50`,
     );
     return rows.map((r) => ({
       id: `x402-settlement-failure-${r.id}`,
       type: 'x402_settlement_failure' as const,
       severity: 'critical' as const,
       title: 'x402 settlement failed',
-      detail: r.error ?? 'settlement failed',
+      detail: r.payer_address
+        ? `x402 settlement failed for ${r.payer_address.slice(0, 8)}… (${r.amount} USDC)`
+        : 'x402 settlement failed',
       link: '/admin/settlements',
       created_at: r.created_at,
     }));
