@@ -26,9 +26,10 @@ import { AdminExchangeRateService } from './admin-exchange-rate.service';
 import { AdminReferralsService } from './admin-referrals.service';
 import { AdminBazaarService } from './admin-bazaar.service';
 import { AdminTeamService } from './admin-team.service';
+import { WebhooksModule } from '../webhooks/webhooks.module';
 
 @Module({
-  imports: [AdminAuthModule, AuthModule, WithdrawalsModule, FacilitatorModule],
+  imports: [AdminAuthModule, AuthModule, WithdrawalsModule, FacilitatorModule, WebhooksModule],
   controllers: [AdminController, AdminTreasurySettlementsController],
   providers: [
     AdminTreasurySettlementsService,
