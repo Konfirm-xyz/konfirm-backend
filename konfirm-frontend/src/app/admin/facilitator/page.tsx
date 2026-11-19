@@ -1,8 +1,4 @@
-'use client';
 
-import { useCallback, useEffect, useState } from 'react';
-
-interface FacilitatorStatus {
   paused: boolean;
   capUsdc: number;
   spentTodayUsdc: number;
