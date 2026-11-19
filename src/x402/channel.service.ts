@@ -181,11 +181,13 @@ export class ChannelService {
     if (contractAddress !== CHANNEL_CONTRACT_ID) {
       return { success: false, errorReason: 'wrong_contract' };
     }
-    // 6 args, matching the deployed contract's real signature (payer, payee,
-    // token, payer_pubkey, deposit, delegated_closer) — this facilitator
-    // used to check for 5, rejecting every real open_channel call the
-    // redeployed contract actually accepts. See PRD docs/PRD.md M2.
-    if (functionName !== 'open_channel' || args.length !== 6) {
+    // 6 args, matching the current contract signature (payer, payee, token,
+    // payer_pubkey, deposit, delegated_closer). The deployed testnet
+    // contract still exposes the older 5-arg open_channel (the 6-arg one
+    // exists only in konfirm-contracts source, not yet redeployed), so both
+    // shapes are accepted here; the delegated_closer checks below only
+    // apply when the 6th arg is actually present.
+    if (functionName !== 'open_channel' || (args.length !== 6 && args.length !== 5)) {
       return { success: false, errorReason: 'wrong_function' };
     }
 
@@ -195,8 +197,8 @@ export class ChannelService {
     const payerPubkey = scValToNative(args[3]) as Buffer;
     const deposit = scValToNative(args[4]) as bigint;
     // Option<Address> — scValToNative gives undefined/null for None, a
-    // G... string for Some(addr).
-    const delegatedCloser = (scValToNative(args[5]) as string | null | undefined) ?? null;
+    // G... string for Some(addr). Absent entirely on the 5-arg signature.
+    const delegatedCloser = args.length === 6 ? ((scValToNative(args[5]) as string | null | undefined) ?? null) : null;
 
     if (payerAddress === signer.address) {
       return { success: false, errorReason: 'facilitator_is_payer' };
