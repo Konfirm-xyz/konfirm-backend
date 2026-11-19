@@ -13,6 +13,25 @@ import { PaymentAttestationService } from './payment-attestation.service';
 const ATTESTATION_LOCK_KEY = 402_004;
 const BATCH_SIZE = 20;
 
+// Retry pacing for a payment whose attestation keeps failing (#68). Without
+// this, a permanently-failing row is re-picked first every sweep (ORDER BY
+// created_at ASC) and can starve newer payments out of every batch. A
+// failure backs off exponentially from one sweep interval up to the cap;
+// past MAX_ATTESTATION_FAILURES the row is dead-lettered -- no longer
+// selected at all -- and left for a human via the stuck-attestation admin
+// notification. Same shape as ChannelKeeperService's keeper backoff.
+const ATTESTATION_BACKOFF_BASE_MS = 2 * 60_000;
+const ATTESTATION_BACKOFF_CAP_MS = 60 * 60_000;
+const MAX_ATTESTATION_FAILURES = 10;
+
+// `failureCount` includes the failure being scheduled (so it's >= 1).
+// +/-20% jitter so rows that started failing together during one RPC outage
+// don't all retry on the same sweep when it recovers.
+export function attestationBackoffMs(failureCount: number, random: () => number = Math.random): number {
+  const base = Math.min(ATTESTATION_BACKOFF_CAP_MS, ATTESTATION_BACKOFF_BASE_MS * 2 ** Math.max(0, failureCount - 1));
+  return Math.round(base * (0.8 + 0.4 * random()));
+}
+
 interface AttestationDueRow {
   id: string;
   payer_address: string;
@@ -20,6 +39,7 @@ interface AttestationDueRow {
   net_usdc: string;
   tx_hash: string;
   merchant_address: string;
+  attestation_failure_count: number;
 }
 
 // In-process @Cron(), the fourth instance of this exact architecture in
@@ -58,13 +78,16 @@ export class PaymentAttestationSweeperService {
 
   private async doSweep(): Promise<void> {
     const { rows } = await pool.query<AttestationDueRow>(
-      `SELECT p.id, p.payer_address, p.muxed_id, p.net_usdc, p.tx_hash, m.stellar_base_address AS merchant_address
+      `SELECT p.id, p.payer_address, p.muxed_id, p.net_usdc, p.tx_hash, m.stellar_base_address AS merchant_address,
+              p.attestation_failure_count
        FROM payments p
        JOIN merchants m ON m.id = p.merchant_id
        WHERE p.status = 'paid' AND p.attested_at IS NULL
+         AND p.attestation_failure_count < $2
+         AND (p.attestation_next_attempt_at IS NULL OR p.attestation_next_attempt_at <= NOW())
        ORDER BY p.created_at ASC
        LIMIT $1`,
-      [BATCH_SIZE],
+      [BATCH_SIZE, MAX_ATTESTATION_FAILURES],
     );
 
     for (const row of rows) {
@@ -75,7 +98,10 @@ export class PaymentAttestationSweeperService {
         // could theoretically change after the fact. Skip rather than
         // attest with a null address; leaves the row for a human to
         // investigate via the stuck-attestation admin notification below.
+        // Recorded as a failure too, so a merchant that never gets an
+        // address can't occupy a batch slot on every sweep forever.
         this.logger.warn(`payment ${row.id} has no merchant address on file, skipping attestation`);
+        await this.recordFailure(row, 'missing_merchant_address');
         continue;
       }
 
@@ -90,6 +116,7 @@ export class PaymentAttestationSweeperService {
 
         if (!result.success) {
           this.logger.warn(`attestation failed for payment ${row.id}: ${result.errorReason}`);
+          await this.recordFailure(row, result.errorReason);
           continue;
         }
 
@@ -99,11 +126,38 @@ export class PaymentAttestationSweeperService {
         );
       } catch (err) {
         // One row's failure -- attestation or the write-back after it --
-        // must never abort the rest of the batch. Left unattested; the
-        // next sweep retries it, same self-healing shape as every other
-        // sweeper in this codebase.
+        // must never abort the rest of the batch. Recorded and backed off
+        // like any other failure so it can't starve the rest of the backlog.
         this.logger.error(`attestation errored for payment ${row.id}: ${err}`);
+        await this.recordFailure(row, String(err));
       }
+    }
+  }
+
+  // `previousFailures` comes from the row read at the start of this sweep;
+  // sweeps never overlap (advisory lock), so nothing else can have changed
+  // it in between. Past MAX_ATTESTATION_FAILURES the row drops out of the
+  // sweep's WHERE clause entirely (dead-lettered) and is only visible to a
+  // human via the stuck-attestation admin notification.
+  private async recordFailure(row: AttestationDueRow, errorReason: string | undefined): Promise<void> {
+    const failures = row.attestation_failure_count + 1;
+    const delayMs = attestationBackoffMs(failures);
+    try {
+      await pool.query(
+        `UPDATE payments
+         SET attestation_failure_count = $2, attestation_last_error = $3,
+             attestation_last_attempt_at = NOW(),
+             attestation_next_attempt_at = NOW() + ($4 * INTERVAL '1 millisecond')
+         WHERE id = $1 AND attested_at IS NULL`,
+        [row.id, failures, errorReason ?? null, delayMs],
+      );
+      if (failures >= MAX_ATTESTATION_FAILURES) {
+        this.logger.error(
+          `payment ${row.id} dead-lettered after ${failures} attestation failures: ${errorReason}`,
+        );
+      }
+    } catch (err) {
+      this.logger.error(`failed to record attestation failure for payment ${row.id}: ${err}`);
     }
   }
 }
