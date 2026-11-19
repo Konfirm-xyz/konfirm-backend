@@ -33,9 +33,14 @@ export class AdminGuard implements CanActivate {
 
     // Same session_version check as AuthGuard: logout bumps it, so a token
     // issued before logout stops working server-side, not just client-side.
-    const { rows } = await pool.query('SELECT session_version FROM admins WHERE id = $1', [claims.id]);
+    const { rows } = await pool.query('SELECT session_version, status FROM admins WHERE id = $1', [claims.id]);
     if (!rows[0] || rows[0].session_version !== (claims.sv ?? 0)) {
       throw new UnauthorizedException('session expired or invalid — please log in again');
+    }
+    // Deactivated admins (#249) are rejected here rather than only at login,
+    // so an already-issued cookie stops working at the next request.
+    if (rows[0].status === 'deactivated') {
+      throw new UnauthorizedException('this admin account has been deactivated');
     }
 
     // Strip the internal session version so it never reaches a response body.

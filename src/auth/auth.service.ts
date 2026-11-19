@@ -585,6 +585,55 @@ export class AuthService {
     return { token: this.issueToken(merchant, row.session_version), merchant };
   }
 
+  // Self-service rotation for a merchant who is already logged in — no reset
+  // email needed. Bumps session_version like resetPassword() does, so every
+  // other session (including one an attacker may hold) stops working; the
+  // caller gets a fresh token for the session that made the change. Only the
+  // owner's own password lives in `merchants`; team-member sessions
+  // (member_id) have their own credentials and are rejected here.
+  async changePassword(
+    merchantId: string,
+    currentPassword: string,
+    newPassword: string,
+    memberId?: string,
+  ): Promise<{ token: string; merchant: MerchantClaims }> {
+    if (memberId) {
+      throw new ForbiddenException('team member passwords are managed by the account owner');
+    }
+    const { rows } = await pool.query(
+      'SELECT id, email, name, stellar_base_address, password_hash, session_version FROM merchants WHERE id = $1',
+      [merchantId],
+    );
+    if (rows.length === 0) throw new NotFoundException('merchant not found');
+    const row = rows[0];
+
+    // 400 rather than 401: the session is fine, only the confirmation is
+    // wrong, and a 401 would read to a client as "you've been logged out".
+    if (!(await bcrypt.compare(currentPassword, row.password_hash))) {
+      throw new BadRequestException('current password is incorrect');
+    }
+    if (await bcrypt.compare(newPassword, row.password_hash)) {
+      throw new BadRequestException('new password must be different from the current one');
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+    const { rows: updated } = await pool.query(
+      `UPDATE merchants SET password_hash = $2, session_version = session_version + 1, updated_at = NOW()
+       WHERE id = $1
+       RETURNING session_version`,
+      [merchantId, passwordHash],
+    );
+
+    const merchant: MerchantClaims = {
+      id: row.id,
+      email: row.email,
+      name: row.name,
+      stellar_base_address: row.stellar_base_address,
+    };
+    this.logger.log(`password changed for merchant ${merchantId}`);
+    return { token: this.issueToken(merchant, updated[0].session_version), merchant };
+  }
+
   verifyToken(token: string): MerchantClaims {
     try {
       return jwt.verify(token, JWT_SECRET) as unknown as MerchantClaims;

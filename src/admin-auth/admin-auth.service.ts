@@ -43,9 +43,10 @@ export class AdminAuthService {
     // Per-account cap on top of the per-IP throttle — see login-attempts.ts.
     adminLoginAttempts.assertNotLocked(account);
     // Matched case-insensitively: admin rows aren't constrained to lowercase.
-    const { rows } = await pool.query('SELECT id, email, name, password_hash, session_version FROM admins WHERE lower(email) = $1', [
-      account,
-    ]);
+    const { rows } = await pool.query(
+      'SELECT id, email, name, password_hash, session_version, status FROM admins WHERE lower(email) = $1',
+      [account],
+    );
     // Same generic error whether the email doesn't exist or the password is
     // wrong, same reasoning as auth.service.ts.
     const invalid = () => new UnauthorizedException('invalid email or password');
@@ -61,6 +62,12 @@ export class AdminAuthService {
     const row = rows[0];
     const ok = await bcrypt.compare(password, row.password_hash);
     if (!ok) {
+      adminLoginAttempts.recordFailure(account);
+      throw invalid();
+    }
+    // Deactivated admins (#249) fail login with the same generic error as a
+    // wrong password, so the response never reveals that the account exists.
+    if (row.status === 'deactivated') {
       adminLoginAttempts.recordFailure(account);
       throw invalid();
     }
