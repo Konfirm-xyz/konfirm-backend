@@ -323,6 +323,11 @@ repeatedly) and `down` can genuinely undo something, not just re-run `CREATE TAB
 hope. The migration's SQL and its tracking-table record land in the same transaction, so a failure
 can't leave the two out of sync.
 
+`schema_migrations` also stores a SHA-256 `checksum` of each applied `.up.sql` file. `migrate:up`
+verifies every recorded checksum before applying anything and fails loudly if an already-applied
+migration file has been edited — fix the file back or add a new migration instead. Rows applied before
+checksums existed have a `NULL` checksum and are backfilled on the next `up`.
+
 What's actually verified, and what isn't: the original round-trip check (apply from empty, revert one
 at a time to nothing, reapply) was done by hand when only migrations `001`–`005` existed. Since then,
 CI runs the full `migrate:up` chain on every push — but always against a **fresh, empty** Postgres, so
