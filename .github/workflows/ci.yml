@@ -18,6 +18,34 @@ permissions:
   checks: write
 
 jobs:
+  # Path guard: this repo owns the backend only. A PR that adds or changes
+  # files under a path owned by another repo (e.g. konfirm-frontend/) fails
+  # here, before any build or test runs.
+  path-guard:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
+    steps:
+      - name: Reject changes to paths this repo does not own
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # Paths owned by sibling repos, not by konfirm-backend.
+          FORBIDDEN='^(konfirm-frontend|konfirm-contracts)/'
+          git init -q .
+          git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+          git fetch -q --no-tags --depth=1 origin "$BASE_SHA" "$HEAD_SHA"
+          changed=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+          echo "Changed files:"
+          echo "$changed"
+          offenders=$(echo "$changed" | grep -E "$FORBIDDEN" || true)
+          if [ -n "$offenders" ]; then
+            echo "::error::This PR touches paths konfirm-backend does not own:"
+            echo "$offenders"
+            exit 1
+          fi
+
   test:
     runs-on: ubuntu-latest
 
