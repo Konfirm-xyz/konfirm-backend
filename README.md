@@ -25,7 +25,7 @@ Cashing out to a bank account is a real SEP-10 (auth) + SEP-24 (interactive with
 ## Prerequisites
 
 - Node.js 22+
-- PostgreSQL 15+, running locally
+- PostgreSQL 15+, running locally — or Docker, see [Containerized Postgres](#containerized-postgres) below
 - Rust (stable) — only needed to run the reconciler
 - The [`stellar` CLI](https://developers.stellar.org/docs/tools/cli/install-cli), on `PATH`, with a `deployer` identity configured (`stellar keys add deployer --secret-key ...`) — needed by the reconciler's on-chain compliance check (`compliance.rs`, still CLI-shelled) and, locally only, as a convenience fallback if `STELLAR_DEPLOYER_SECRET_KEY` is unset (`x402.service.ts` resolves the facilitator's signing key via `stellar keys secret deployer` in that case). The API's own compliance checks (`payments.service.ts`, `x402.service.ts`) call the compliance contract directly over Soroban RPC — no CLI involved — see [Compliance](#compliance) below.
 - [Freighter](https://www.freighter.app/) browser extension, set to Testnet, for exercising checkout yourself
@@ -64,6 +64,23 @@ Create the database and apply migrations:
 createdb konfirm_dev
 npm run migrate:up
 ```
+
+### Containerized Postgres
+
+Instead of installing Postgres natively, bring one up with Docker:
+
+```bash
+docker compose up -d
+```
+
+That starts `postgres:15-alpine` on `localhost:5432` with a persistent volume, a healthcheck, and an init script (`scripts/init-db.sql`) that creates both `konfirm_dev` and `konfirm_test`. Point `.env` at it and migrate:
+
+```bash
+DATABASE_URL=postgres://konfirm:konfirm@localhost:5432/konfirm_dev
+npm run migrate:up
+```
+
+The test database is reachable at `postgres://konfirm:konfirm@localhost:5432/konfirm_test`. Stop the container with `docker compose down` (add `-v` to also drop the data volume).
 
 Run the API:
 
