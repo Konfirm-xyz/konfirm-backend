@@ -73,6 +73,12 @@ export function captureException(exception: unknown): void {
   Sentry.captureException(exception);
 }
 
+// For operational alerts that aren't exceptions (a stalled reconciler, a
+// halted spend guard): they must reach Sentry as an event, not only a log line.
+export function captureMessage(message: string, level: 'error' | 'warning' = 'error'): void {
+  Sentry.captureMessage(message, level);
+}
+
 // Gives a queued event a chance to send before a deliberate exit. Resolves
 // immediately when Sentry isn't configured.
 export async function flushSentry(timeoutMs: number): Promise<void> {

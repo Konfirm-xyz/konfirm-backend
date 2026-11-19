@@ -26,18 +26,31 @@ export interface AdminStats {
 @Injectable()
 export class AdminStatsService {
   async get(): Promise<AdminStats> {
-    const [merchantCounts, todayPayments, weekPayments, dailySeries, blockedCount, reconcilerState, openWithdrawals, facilitatorState] = await Promise.all([
+    // Both the daily_volume chart and the last_7d_net_usdc headline are derived
+    // from the same 7 UTC-calendar-day buckets, so summing the bars always
+    // equals the headline figure (not just at UTC midnight).
+    const dayKeys: string[] = [];
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date();
+      d.setUTCDate(d.getUTCDate() - i);
+      dayKeys.push(d.toISOString().slice(0, 10));
+    }
+    const windowStart = `${dayKeys[0]}T00:00:00Z`;
+
+    const [merchantCounts, todayPayments, dailySeries, blockedCount, reconcilerState, openWithdrawals, facilitatorState] = await Promise.all([
       pool.query(`SELECT status, COUNT(*)::int AS count FROM merchants GROUP BY status`),
       pool.query(
         `SELECT COUNT(*)::int AS count, COALESCE(SUM(net_usdc), 0) AS net_usdc
-         FROM payments WHERE created_at >= date_trunc('day', NOW())`,
+         FROM payments WHERE created_at >= date_trunc('day', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'`,
       ),
-      pool.query(`SELECT COALESCE(SUM(net_usdc), 0) AS net_usdc FROM payments WHERE created_at >= NOW() - INTERVAL '168 hours'`),
       pool.query(
-        `SELECT date_trunc('day', created_at) AS day, SUM(net_usdc) AS net_usdc
+        `SELECT to_char(date_trunc('day', created_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS day,
+                COALESCE(SUM(net_usdc), 0)::text AS net_usdc
          FROM payments
-         WHERE created_at >= NOW() - INTERVAL '168 hours'
-         GROUP BY day`,
+         WHERE created_at >= $1::timestamptz
+         GROUP BY 1
+         ORDER BY 1`,
+        [windowStart],
       ),
       pool.query(`SELECT COUNT(*)::int AS count FROM blocked_addresses`),
       pool.query(`SELECT value, updated_at FROM reconciler_state WHERE key = 'cursor'`),
@@ -56,15 +69,16 @@ export class AdminStatsService {
 
     const byDay = new Map<string, string>();
     for (const row of dailySeries.rows) {
-      byDay.set(new Date(row.day).toISOString().slice(0, 10), row.net_usdc);
+      byDay.set(row.day, row.net_usdc);
     }
-    const daily_volume: { date: string; net_usdc: string }[] = [];
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date();
-      d.setUTCDate(d.getUTCDate() - i);
-      const key = d.toISOString().slice(0, 10);
-      daily_volume.push({ date: key, net_usdc: byDay.get(key) ?? '0' });
-    }
+    const daily_volume: { date: string; net_usdc: string }[] = dayKeys.map((date) => ({
+      date,
+      net_usdc: byDay.get(date) ?? '0',
+    }));
+
+    // Single source of truth: the headline figure is the sum of the same
+    // 7 calendar-day buckets shown in the chart.
+    const last7dNetUsdc = daily_volume.reduce((sum, bucket) => sum + Number(bucket.net_usdc), 0).toFixed(7);
 
     const reconcilerUpdatedAt: string | null = reconcilerState.rows[0]?.updated_at ?? null;
     const reconcilerStale =
@@ -84,7 +98,7 @@ export class AdminStatsService {
       payments: {
         today_count: todayPayments.rows[0].count,
         today_net_usdc: todayPayments.rows[0].net_usdc,
-        last_7d_net_usdc: weekPayments.rows[0].net_usdc,
+        last_7d_net_usdc: last7dNetUsdc,
       },
       daily_volume,
       compliance: { blocked_count: blockedCount.rows[0].count },

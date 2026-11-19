@@ -1,3 +1,5 @@
+-- 028_team_members.up.sql
+--
 -- Team/multi-user access for merchant accounts (issue #42).
 --
 -- Design decisions:

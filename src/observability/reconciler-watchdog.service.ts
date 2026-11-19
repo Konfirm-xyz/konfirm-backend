@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { pool } from '../db/pool';
-import { captureException } from './sentry';
+import { captureException, captureMessage } from './sentry';
 
 // How long the reconciler can go without moving its cursor before we call it
 // stalled. Real payments aren't visible on the dashboard while it's stalled
@@ -38,9 +38,9 @@ export class ReconcilerWatchdogService {
 
       const stalled = activeMerchants > 0 && ageMinutes !== null && ageMinutes > RECONCILER_STALL_MINUTES;
       if (stalled) {
-        this.logger.error(
-          `reconciler looks stalled: cursor last moved ${ageMinutes!.toFixed(1)} min ago with ${activeMerchants} active merchant(s) — payments may not be showing up (see docs/RUNBOOK.md §4)`,
-        );
+        const message = `reconciler looks stalled: cursor last moved ${ageMinutes!.toFixed(1)} min ago with ${activeMerchants} active merchant(s) — payments may not be showing up (see docs/RUNBOOK.md §4)`;
+        this.logger.error(message);
+        captureMessage(message);
       }
 
       // Two more operationally-critical signals, surfaced on the same
@@ -53,10 +53,14 @@ export class ReconcilerWatchdogService {
       const spendGuardHalted = halt.rows.length > 0;
       const failedFeeSettlements: number = failures.rows[0].count;
       if (spendGuardHalted) {
-        this.logger.error('facilitator spend guard is halted; facilitator signing requires manual review (see docs/KEYS.md)');
+        const message = 'facilitator spend guard is halted; facilitator signing requires manual review (see docs/KEYS.md)';
+        this.logger.error(message);
+        captureMessage(message);
       }
       if (failedFeeSettlements > 0) {
-        this.logger.error(`fee settlement submission failures: ${failedFeeSettlements} pending settlement(s) were rejected by Horizon`);
+        const message = `fee settlement submission failures: ${failedFeeSettlements} pending settlement(s) were rejected by Horizon`;
+        this.logger.error(message);
+        captureMessage(message);
       }
       return { stalled, ageMinutes, spendGuardHalted, failedFeeSettlements };
     } catch (err) {
