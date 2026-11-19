@@ -1,3 +1,5 @@
+-- 028_payment_notes.up.sql
+--
 -- Persistent investigation/notes thread on a payment (issue #34).
 --
 -- The existing admin_actions audit log captures one-shot status-change

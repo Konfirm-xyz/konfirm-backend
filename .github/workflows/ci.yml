@@ -58,6 +58,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Fails the build if two migration files share a numeric prefix, which
+      # would make a fresh build's apply order differ from production's.
+      - name: Check migration prefixes are unique
+        run: npm run migrate:check
+
       - name: Apply migrations to the test database
         run: npm run migrate:up
 
