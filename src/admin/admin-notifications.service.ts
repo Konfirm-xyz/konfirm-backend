@@ -131,17 +131,17 @@ export class AdminNotificationsService {
   }
 
   private async staleAttestations(): Promise<AdminNotification[]> {
-    const { rows } = await pool.query<{ id: string; updated_at: string }>(
-      `SELECT id, updated_at FROM attestations WHERE updated_at < NOW() - INTERVAL '24 hours' ORDER BY updated_at DESC LIMIT 50`,
+    const { rows } = await pool.query<{ id: string; created_at: string }>(
+      `SELECT id, created_at FROM payments WHERE status = 'paid' AND attested_at IS NULL AND created_at < NOW() - INTERVAL '24 hours' ORDER BY created_at DESC LIMIT 50`,
     );
     return rows.map((r) => ({
       id: `stale-attestation-${r.id}`,
       type: 'stale_attestation' as const,
       severity: 'warning' as const,
-      title: 'Attestation stale',
-      detail: `Attestation ${r.id} has not been refreshed in over 24 hours`,
-      link: '/admin/attestations',
-      created_at: r.updated_at,
+      title: 'Attestation overdue',
+      detail: `Payment ${r.id} has been paid for over 24 hours without an attestation`,
+      link: '/admin/payments',
+      created_at: r.created_at,
     }));
   }
 }
