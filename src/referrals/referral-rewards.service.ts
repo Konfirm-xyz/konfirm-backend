@@ -18,7 +18,7 @@ import { MAILER, Mailer } from '../mail/mailer';
 // business but high enough that the Stellar base reserve + a typical testnet
 // fund cycle no longer covers it from pocket change, and it forces at least
 // one real checkout interaction rather than a self-constructed operation.
-const MIN_REFERRAL_QUALIFYING_AMOUNT_USDC = 1;
+export const MIN_REFERRAL_QUALIFYING_AMOUNT_USDC = 1;
 
 // How much of a per-payment volume discount the referrer's promo covers.
 // A NULL cap (the old behaviour) meant unlimited volume at the discounted

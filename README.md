@@ -235,15 +235,25 @@ Every mutation an admin makes is written to `admin_actions` (who, what, on what,
 
 ```
 src/
-  auth/         signup, login, JWT session guard
-  links/        payment link creation + public projection
-  sessions/     muxed-ID reservation against a link
-  payments/     prepare-tx (Freighter), pay-uri (SEP-7), compliance check, by-merchant queries
-  withdrawals/  SEP-10/SEP-24 fiat off-ramp
-  admin-auth/   separate admin identity — guard, JWT service, login/logout/me controller
   admin/        admin resource endpoints — merchants, payments, compliance, reconciler, withdrawal-attempts — + audit logger
+  admin-auth/   separate admin identity — guard, JWT service, login/logout/me controller
+  auth/         signup, login, JWT session guard
+  bazaar/       x402 Bazaar listings — submission, review, public manifest
   common/       shared asset resolution (XLM/USDC)
   db/           Postgres pool
+  deposits/     testnet faucet guard and deposit status
+  facilitator/  x402 facilitator sweep — spend-guard, signing halt/resume
+  fees/         fee collection, settlement building and dispute flow
+  health/       health-check endpoint
+  links/        payment link creation + public projection
+  mail/         transactional email relay (password reset, invite, email change)
+  observability/ global exception filter, structured logging helpers
+  payments/     prepare-tx (Freighter), pay-uri (SEP-7), compliance check, by-merchant queries
+  referrals/    referral code generation, reward sweep, admin reporting
+  services/     shared singleton services (e.g. admin stats)
+  sessions/     muxed-ID reservation against a link
+  withdrawals/  SEP-10/SEP-24 fiat off-ramp
+  x402/         x402 single-shot payment channels and settlement
 reconciler/     Rust binary — watches Horizon, writes confirmed payments
 db/migrations/  ordered .up.sql/.down.sql pairs, applied by db/migrate.ts
 db/migrate.ts   the migration runner itself — no framework, tracks applied migrations in Postgres
