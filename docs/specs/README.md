@@ -11,14 +11,16 @@ Each spec states the question, the options, a recommendation, the decision you n
 | 5 | [Pay-what-you-want links](05-pay-what-you-want.md) | Allowed, with what minimum and maximum | Opt-in per link, with a required minimum and an optional maximum | Feature |
 | 6 | [Mainnet](06-mainnet.md) | Go-live values, audit, and the pilot plan | Audit first, then invite-only pilot with caps | Launch |
 | 7 | [Comment style](07-comment-style.md) | Accept the style rule and cleanup scope | Adopt the rule, clean up one directory per PR | Maintainability |
+| 8 | [Fee settlement](08-fee-settlement.md) | Settlement timing and reconciler verdict handling | Settle fees in the same transaction as the payment; reconciler emits typed verdicts | Revenue integrity |
 
 ## Order I'd take them
 
 1. **Deployer multisig (3)**: a security issue, and it needs no decision beyond who holds the keys.
 2. **Pricing (1) and cash-out fee (2)**: decide together, because they set the revenue model.
 3. **Per-asset treasury (4)**: fixes fee custody, with no contract change.
-4. **Mainnet (6)**: after the audit, and after 1 to 4.
-5. **PWYW (5)** and **comment style (7)**: when there's capacity.
+4. **Fee settlement (8)**: directly affects revenue integrity once mainnet is live.
+5. **Mainnet (6)**: after the audit, and after 1 to 4.
+6. **PWYW (5)** and **comment style (7)**: when there's capacity.
 
 ## Target architecture
 
