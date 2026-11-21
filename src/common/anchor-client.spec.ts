@@ -85,4 +85,45 @@ describe('AnchorClient', () => {
       await expect(client.getChallenge('GABC')).rejects.toThrow('KYC required');
     });
   });
+
+  // ── exchangeToken (#364) ───────────────────────────────────────────────────
+
+  describe('exchangeToken', () => {
+    const client = new AnchorClient(endpoints, { partnerLabel: 'test anchor', actionNoun: 'deposit' });
+
+    it('returns the response body on success', async () => {
+      fetchMock.mockReturnValueOnce(jsonResponse(200, { token: 'jwt-abc' }));
+      const result = await client.exchangeToken('signed-xdr');
+      expect(result).toEqual({ token: 'jwt-abc' });
+    });
+
+    it('POSTs the signed transaction to webAuthUrl', async () => {
+      fetchMock.mockReturnValueOnce(jsonResponse(200, {}));
+      await client.exchangeToken('signed-xdr-payload');
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(endpoints.webAuthUrl);
+      expect(init.method).toBe('POST');
+      expect(JSON.parse(init.body)).toEqual({ transaction: 'signed-xdr-payload' });
+    });
+
+    it('throws using the anchor\'s own error message when given', async () => {
+      fetchMock.mockReturnValue(jsonResponse(400, { error: 'signature invalid' }));
+      await expect(client.exchangeToken('bad-xdr')).rejects.toThrow('signature invalid');
+    });
+
+    it('falls back to partnerLabel wording when no error field is returned', async () => {
+      fetchMock.mockReturnValue(jsonResponse(400, {}));
+      await expect(client.exchangeToken('bad-xdr')).rejects.toThrow(/test anchor/);
+    });
+
+    it('retries exactly once on a 5xx', async () => {
+      // First call: 5xx (triggers retry); second call: 200 success.
+      fetchMock
+        .mockReturnValueOnce(jsonResponse(503, {}))
+        .mockReturnValueOnce(jsonResponse(200, { token: 'retried-jwt' }));
+      const result = await client.exchangeToken('signed-xdr');
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(result).toEqual({ token: 'retried-jwt' });
+    });
+  });
 });
