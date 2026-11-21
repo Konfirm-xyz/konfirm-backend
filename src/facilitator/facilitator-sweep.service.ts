@@ -19,6 +19,7 @@ import { getFacilitatorSigner, withFacilitatorSubmissionLock } from '../common/f
 import { FacilitatorSpendGuardService, FacilitatorHalted, FacilitatorSpendCapExceeded } from './facilitator-spend-guard.service';
 import { NETWORK_PASSPHRASE, RPC_URL } from '../common/stellar-network';
 import { USDC_SAC_ID, TREASURY_CONTRACT_ID } from '../common/stellar-network';
+import { toStroops, fromStroops } from '../common/money-rules';
 
 // USDC's SAC (SEP-41 token contract) on testnet -- same address
 // admin-treasury.service.ts and @x402/stellar's own ExactStellarScheme use.
@@ -118,12 +119,12 @@ export class FacilitatorSweepService {
       return;
     }
 
-    const minStroops = BigInt(Math.round(minUsdc * STROOPS_PER_UNIT));
+    const minStroops = toStroops(minUsdc.toFixed(7));
     const sweepStroops = balanceStroops - minStroops;
     if (sweepStroops <= 0n) {
       return;
     }
-    const sweepUsdc = Number(sweepStroops) / STROOPS_PER_UNIT;
+    const sweepUsdc = fromStroops(sweepStroops);
 
     // Submit first, then record spend only once the transfer is known to
     // have succeeded. Recording before submission meant a failed/timed-out
@@ -138,7 +139,7 @@ export class FacilitatorSweepService {
     }
 
     try {
-      await this.spendGuard.checkAndRecordSpend(sweepUsdc, 'sweep', TREASURY_CONTRACT_ID);
+      await this.spendGuard.checkAndRecordSpend(parseFloat(sweepUsdc), 'sweep', TREASURY_CONTRACT_ID);
     } catch (err) {
       if (err instanceof FacilitatorHalted || err instanceof FacilitatorSpendCapExceeded) {
         // The transfer already landed, so the money moved regardless -- log
@@ -152,7 +153,7 @@ export class FacilitatorSweepService {
     }
 
     this.logger.log(
-      `swept ${sweepUsdc.toFixed(7)} USDC from ${signer.address} to treasury ${TREASURY_CONTRACT_ID}: ${result.transaction}`,
+      `swept ${sweepUsdc} USDC from ${signer.address} to treasury ${TREASURY_CONTRACT_ID}: ${result.transaction}`,
     );
   }
 

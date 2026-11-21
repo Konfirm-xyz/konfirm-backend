@@ -10,6 +10,7 @@ import { getFeeCollectionSigner } from '../common/platform-fee';
 import { FacilitatorSpendGuardService, FacilitatorHalted, FacilitatorSpendCapExceeded } from './facilitator-spend-guard.service';
 import { NETWORK_PASSPHRASE, RPC_URL } from '../common/stellar-network';
 import { USDC_SAC_ID, TREASURY_CONTRACT_ID } from '../common/stellar-network';
+import { toStroops, fromStroops } from '../common/money-rules';
 
 // USDC's SAC (SEP-41 token contract) on testnet -- same address
 // facilitator-sweep.service.ts and admin-treasury.service.ts use.
@@ -124,12 +125,12 @@ export class FeeCollectionSweepService {
       return;
     }
 
-    const minStroops = BigInt(Math.round(minUsdc * STROOPS_PER_UNIT));
+    const minStroops = toStroops(minUsdc.toFixed(7));
     const sweepStroops = balanceStroops - minStroops;
     if (sweepStroops <= 0n) {
       return;
     }
-    const sweepUsdc = Number(sweepStroops) / STROOPS_PER_UNIT;
+    const sweepUsdc = fromStroops(sweepStroops);
 
     // Submit first, record spend only once the transfer is known to have
     // succeeded -- a failed or timed-out attempt must not consume cap
@@ -137,7 +138,7 @@ export class FeeCollectionSweepService {
     // runs before submission so a halted/exceeded guard blocks the sweep
     // without ever sending a transfer.
     try {
-      await this.spendGuard.checkAndRecordSpend(sweepUsdc, 'fee-sweep', TREASURY_CONTRACT_ID);
+      await this.spendGuard.checkAndRecordSpend(parseFloat(sweepUsdc), 'fee-sweep', TREASURY_CONTRACT_ID);
     } catch (err) {
       if (err instanceof FacilitatorHalted || err instanceof FacilitatorSpendCapExceeded) {
         this.logger.warn(`sweep blocked: ${err.message}`);
@@ -152,7 +153,7 @@ export class FeeCollectionSweepService {
       return;
     }
     this.logger.log(
-      `swept ${sweepUsdc.toFixed(7)} USDC from ${signer.address} to treasury ${TREASURY_CONTRACT_ID}: ${result.transaction}`,
+      `swept ${sweepUsdc} USDC from ${signer.address} to treasury ${TREASURY_CONTRACT_ID}: ${result.transaction}`,
     );
   }
 

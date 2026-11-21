@@ -3,6 +3,7 @@ import { Cron } from '@nestjs/schedule';
 import { pool } from '../db/pool';
 import { getFacilitatorSigner } from '../common/facilitator-signer';
 import { ChannelService, FacilitatorCallResult } from './channel.service';
+import { captureException } from '../observability/sentry';
 
 // The on-chain channel contract was deployed with challenge_period_secs =
 // 86400 (24h) — see konfirm-contracts/README.md. There's no on-chain getter
@@ -315,10 +316,11 @@ export class ChannelKeeperService {
        WHERE status = 'open' AND delegated_closer IS NULL AND last_activity_at < NOW() - INTERVAL '168 hours'`,
     );
     for (const row of rows) {
-      this.logger.warn(
+      const message =
         `channel ${row.onchain_channel_id} idle for ${row.idle_days} days — no delegated_closer was ` +
-          `granted at open time, so the keeper has no authority to close it. Manual /x402/channel/close needed.`,
-      );
+        `granted at open time, so the keeper has no authority to close it. Manual /x402/channel/close needed.`;
+      this.logger.warn(message);
+      captureException(new Error(message));
     }
   }
 
@@ -339,10 +341,11 @@ export class ChannelKeeperService {
       [STUCK_FAILURE_THRESHOLD],
     );
     for (const row of rows) {
-      this.logger.error(
+      const message =
         `channel ${row.onchain_channel_id} (${row.status}) stuck: ${row.keeper_failure_count} consecutive keeper ` +
-          `failures, last ${row.keeper_last_error_kind}: ${row.keeper_last_error} — needs manual review.`,
-      );
+        `failures, last ${row.keeper_last_error_kind}: ${row.keeper_last_error} — needs manual review.`;
+      this.logger.error(message);
+      captureException(new Error(message));
     }
   }
 }
