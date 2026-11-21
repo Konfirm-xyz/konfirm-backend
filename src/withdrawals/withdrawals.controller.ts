@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Logger, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { ApiBody, ApiCookieAuth, ApiOperation, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { z } from 'zod';
@@ -29,6 +29,8 @@ const prepareSchema = z.object({
 @ApiCookieAuth('merchant-session')
 @Throttle({ default: { limit: 20, ttl: 60_000 } })
 export class WithdrawalsController {
+  private readonly logger = new Logger(WithdrawalsController.name);
+
   constructor(private readonly withdrawals: WithdrawalsService) {}
 
   // Every endpoint that acts on the merchant's account goes through this, so
@@ -92,8 +94,7 @@ export class WithdrawalsController {
         [req.merchant.id, body.currency, result.id, body.token],
       );
     } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn('[withdrawals] could not record admin-visibility tracking row', err);
+      this.logger.warn('could not record admin-visibility tracking row', err);
     }
     return result;
   }
