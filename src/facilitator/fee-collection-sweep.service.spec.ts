@@ -71,17 +71,28 @@ describe('FeeCollectionSweepService', () => {
     expect(submitTransfer).not.toHaveBeenCalled();
   });
 
-  it('never sends a transfer while the spend guard is halted', async () => {
+  it('submits the transfer before recording spend — a failed transfer does not consume cap budget', async () => {
+    usdc.balance.mockResolvedValue({ result: 35_000_000n });
+    submitTransfer.mockResolvedValueOnce({ success: false, errorReason: 'rpc timeout' });
+    await expect(service.sweep()).resolves.toBeUndefined();
+    expect(submitTransfer).toHaveBeenCalledWith(expect.any(String), 25_000_000n);
+    // Spend must NOT be recorded when the transfer failed.
+    expect(spendGuard.checkAndRecordSpend).not.toHaveBeenCalled();
+  });
+
+  it('when the spend guard halts after a successful transfer, logs the conflict and does not throw', async () => {
     usdc.balance.mockResolvedValue({ result: 35_000_000n });
     spendGuard.checkAndRecordSpend.mockRejectedValue(new FacilitatorHalted('halted'));
     await expect(service.sweep()).resolves.toBeUndefined();
-    expect(submitTransfer).not.toHaveBeenCalled();
+    // Transfer still happened (money moved) — guard rejects recording after the fact.
+    expect(submitTransfer).toHaveBeenCalledWith(expect.any(String), 25_000_000n);
   });
 
   it('sweeps everything above the minimum once the guard allows it', async () => {
     usdc.balance.mockResolvedValue({ result: 35_000_000n });
     await service.sweep();
-    expect(spendGuard.checkAndRecordSpend).toHaveBeenCalledWith(2.5, 'fee-sweep', TREASURY_CONTRACT_ID);
+    // Transfer submitted first, then spend recorded.
     expect(submitTransfer).toHaveBeenCalledWith(expect.any(String), 25_000_000n);
+    expect(spendGuard.checkAndRecordSpend).toHaveBeenCalledWith(2.5, 'fee-sweep', TREASURY_CONTRACT_ID);
   });
 });
