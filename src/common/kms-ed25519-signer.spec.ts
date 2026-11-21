@@ -116,6 +116,30 @@ describe('createKmsEd25519Signer', () => {
     await expect(createKmsEd25519Signer('test-key-id')).rejects.toThrow('unexpected Ed25519 public key length');
   });
 
+  it('rejects a 63-byte signature from KMS rather than silently attaching a corrupt one (#368)', async () => {
+    const keypair = Keypair.random();
+    send.mockImplementation((command: { __type: string }) => {
+      if (command.__type === 'GetPublicKey') {
+        return Promise.resolve({ PublicKey: Buffer.concat([ED25519_SPKI_PREFIX, keypair.rawPublicKey()]) });
+      }
+      if (command.__type === 'Sign') {
+        // Return a 63-byte signature — one byte short of the required 64.
+        return Promise.resolve({ Signature: keypair.sign(Buffer.alloc(32)).slice(0, 63) });
+      }
+      throw new Error(`unexpected command ${command.__type}`);
+    });
+    const signer = await createKmsEd25519Signer('test-key-id');
+
+    const account = new Account(signer.address, '0');
+    const tx = new TransactionBuilder(account, { fee: '100', networkPassphrase: NETWORK_PASSPHRASE })
+      .addOperation(Operation.bumpSequence({ bumpTo: '1' }))
+      .setTimeout(30)
+      .build();
+
+    const result = await signer.signTransaction(tx.toXDR(), { networkPassphrase: NETWORK_PASSPHRASE });
+    expect(result.error?.message).toMatch(/unexpected Ed25519 signature length.*63.*64/);
+  });
+
   it('signAuthEntry throws rather than silently producing an invalid result, since it has no real implementation yet', async () => {
     const keypair = Keypair.random();
     mockKmsFor(keypair);

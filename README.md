@@ -538,7 +538,7 @@ private networking:
 |---|---|---|---|
 | `api` | `/Dockerfile` | Yes | The NestJS app — `railway.json` at repo root |
 | `reconciler` | `reconciler/Dockerfile` | No | Watches Horizon, writes confirmed payments — `reconciler/railway.json`, restart-always |
-| backup cron | repo root, custom start command | No | Runs `db/scripts/backup.sh` on a schedule against the private `DATABASE_URL` — configured directly in the Railway dashboard as a Cron Job service, not a checked-in config file (a third service sharing the repo root can't share the default-discovered `railway.json` filename with `api`) |
+| backup cron | `db/scripts/Dockerfile` | No | Runs `db/scripts/backup.sh` on a schedule against the private `DATABASE_URL` — `db/scripts/railway.json` sets `dockerfilePath: db/scripts/Dockerfile`, so it no longer needs to share the root-level `railway.json` with the `api` service |
 
 Neither `Dockerfile` builds the `stellar` CLI from source anymore. The root `Dockerfile` (the `api`
 service) never did; `reconciler/Dockerfile` used to (`cargo install --locked stellar-cli`, for
