@@ -25,8 +25,8 @@ export function isNonTransactional(sql: string): boolean {
   return sql.split(/\r?\n/, 1)[0].trim() === NO_TRANSACTION_MARKER;
 }
 
-async function ensureTrackingTable(): Promise<void> {
-  await pool.query(`
+async function ensureTrackingTableOn(db: Pool): Promise<void> {
+  await db.query(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       name TEXT PRIMARY KEY,
       applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -34,11 +34,21 @@ async function ensureTrackingTable(): Promise<void> {
   `);
 }
 
-function pendingUpFiles(applied: Set<string>): string[] {
-  return readdirSync(MIGRATIONS_DIR)
+/** @deprecated Use ensureTrackingTableOn(db) */
+async function ensureTrackingTable(): Promise<void> {
+  await ensureTrackingTableOn(pool);
+}
+
+function pendingUpFilesFrom(migrationsDir: string, applied: Set<string>): string[] {
+  return readdirSync(migrationsDir)
     .filter((f) => f.endsWith('.up.sql'))
     .sort()
     .filter((f) => !applied.has(f.replace(/\.up\.sql$/, '')));
+}
+
+/** @deprecated Use pendingUpFilesFrom(dir, applied) */
+function pendingUpFiles(applied: Set<string>): string[] {
+  return pendingUpFilesFrom(MIGRATIONS_DIR, applied);
 }
 
 // The migration's own SQL and its tracking-table record land in the same
@@ -75,11 +85,11 @@ export async function applyMigrationSql(db: Pool, sql: string, trackingQuery: st
   }
 }
 
-async function up(): Promise<void> {
-  await ensureTrackingTable();
-  const { rows } = await pool.query('SELECT name FROM schema_migrations');
+export async function up(db: Pool = pool, migrationsDir: string = MIGRATIONS_DIR): Promise<void> {
+  await ensureTrackingTableOn(db);
+  const { rows } = await db.query('SELECT name FROM schema_migrations');
   const applied = new Set(rows.map((r) => r.name as string));
-  const pending = pendingUpFiles(applied);
+  const pending = pendingUpFilesFrom(migrationsDir, applied);
 
   if (pending.length === 0) {
     console.log('up to date — nothing to apply.');
@@ -89,15 +99,15 @@ async function up(): Promise<void> {
   for (const file of pending) {
     const name = file.replace(/\.up\.sql$/, '');
     console.log(`applying ${name}...`);
-    const sql = readFileSync(join(MIGRATIONS_DIR, file), 'utf8');
-    await applyMigrationSql(pool, sql, 'INSERT INTO schema_migrations (name) VALUES ($1)', [name]);
+    const sql = readFileSync(join(migrationsDir, file), 'utf8');
+    await applyMigrationSql(db, sql, 'INSERT INTO schema_migrations (name) VALUES ($1)', [name]);
   }
   console.log(`applied ${pending.length} migration(s).`);
 }
 
-async function down(steps: number): Promise<void> {
-  await ensureTrackingTable();
-  const { rows } = await pool.query('SELECT name FROM schema_migrations ORDER BY applied_at DESC LIMIT $1', [steps]);
+export async function down(steps: number, db: Pool = pool, migrationsDir: string = MIGRATIONS_DIR): Promise<void> {
+  await ensureTrackingTableOn(db);
+  const { rows } = await db.query('SELECT name FROM schema_migrations ORDER BY applied_at DESC LIMIT $1', [steps]);
 
   if (rows.length === 0) {
     console.log('nothing to revert.');
@@ -105,13 +115,13 @@ async function down(steps: number): Promise<void> {
   }
 
   for (const { name } of rows) {
-    const downFile = join(MIGRATIONS_DIR, `${name}.down.sql`);
+    const downFile = join(migrationsDir, `${name}.down.sql`);
     if (!existsSync(downFile)) {
       throw new Error(`no down-migration found for ${name} (expected ${downFile}) — refusing to leave the tracking table out of sync`);
     }
     console.log(`reverting ${name}...`);
     const sql = readFileSync(downFile, 'utf8');
-    await applyMigrationSql(pool, sql, 'DELETE FROM schema_migrations WHERE name = $1', [name]);
+    await applyMigrationSql(db, sql, 'DELETE FROM schema_migrations WHERE name = $1', [name]);
   }
   console.log(`reverted ${rows.length} migration(s).`);
 }
@@ -119,9 +129,9 @@ async function down(steps: number): Promise<void> {
 async function main(): Promise<void> {
   const [, , cmd, arg] = process.argv;
   if (cmd === 'up') {
-    await up();
+    await up(pool, MIGRATIONS_DIR);
   } else if (cmd === 'down') {
-    await down(arg ? Number(arg) : 1);
+    await down(arg ? Number(arg) : 1, pool, MIGRATIONS_DIR);
   } else {
     console.error('usage: ts-node db/migrate.ts <up|down> [steps]');
     process.exitCode = 1;

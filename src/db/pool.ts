@@ -30,5 +30,8 @@ export const pool = new Pool({
   // so an inherited non-UTC default would silently move the daily reset.
   // This also keeps day-bucketing queries aligned with the JS side, which
   // keys daily_volume buckets by UTC calendar day.
+  // Cross-reference: #137 (spend-cap midnight timezone) is moot for every
+  // query that runs through this pool, because this UTC pin is applied at
+  // connection time before any query executes.
   options: '-c timezone=UTC',
 });
