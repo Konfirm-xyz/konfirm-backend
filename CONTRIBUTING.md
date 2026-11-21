@@ -2,7 +2,7 @@
 
 ## Local setup
 
-Use Node.js 20+ and PostgreSQL 15+, with the database server running. From the
+Use Node.js 22+ and PostgreSQL 15+, with the database server running. From the
 repository root, install dependencies and prepare the dedicated test database:
 
 ```bash

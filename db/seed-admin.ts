@@ -10,7 +10,8 @@ import { Pool } from 'pg';
 const pool = new Pool({ connectionString: process.env.DATABASE_URL ?? 'postgres:///konfirm_dev' });
 
 async function main(): Promise<void> {
-  const [, , email, password, ...nameParts] = process.argv;
+  const [, , rawEmail, password, ...nameParts] = process.argv;
+  const email = rawEmail?.trim().toLowerCase();
   const name = nameParts.join(' ');
   if (!email || !password || !name) {
     console.error('usage: ts-node db/seed-admin.ts <email> <password> <name>');
