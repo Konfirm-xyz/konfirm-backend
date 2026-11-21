@@ -1,9 +1,11 @@
 # Priority coverage plan: links, sessions, payments, deposits
 
-Status: the only spec under `src/{payments,links,sessions,deposits,withdrawals}` is
-`src/deposits/testnet-faucet.guard.spec.ts`. This document lists the specs to write first,
-ordered by risk, so the next test PR starts from the riskiest branches rather than happy paths.
-It does not add tests itself.
+Status: four specs now exist under `src/{payments,links,sessions,deposits,withdrawals}`:
+`src/deposits/testnet-faucet.guard.spec.ts`, `src/payments/payment-attestation.service.spec.ts`,
+`src/payments/payments.controller.spec.ts`, and `src/links/links.service.spec.ts`.
+Sessions, withdrawals, and most of `PaymentsService`'s business logic remain uncovered.
+This document lists the specs to write first, ordered by risk, so the next test PR starts from
+the riskiest branches rather than happy paths. It does not add tests itself.
 
 ## Acceptance bar
 
