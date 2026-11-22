@@ -385,12 +385,12 @@ export class AuthController {
       'Only meaningful for sessions that were issued via the standard merchant login ' +
       '(no member_id). Member sessions already have a row and receive 409.',
   })
-  @ApiBody(zodBody(z.object({ password: z.string().min(8) }), 'Bootstrap owner'))
+  @ApiBody(zodBody(z.object({ password: passwordSchema }), 'Bootstrap owner'))
   @ApiResponse({ status: 200, description: 'Owner row created or already existed. Returns { ok: true }.' })
   @ApiResponse({ status: 401, description: 'Not authenticated.' })
   @ApiResponse({ status: 409, description: 'A member row for this merchant+email already exists.' })
   async bootstrapOwner(
-    @Body(new ZodValidationPipe(z.object({ password: z.string().min(8).refine((p) => Buffer.byteLength(p, 'utf8') <= 72, 'password must be 72 bytes or fewer') })))
+    @Body(new ZodValidationPipe(z.object({ password: passwordSchema })))
     body: { password: string },
     @Req() req: AuthedRequest,
     @Res({ passthrough: true }) res: Response,

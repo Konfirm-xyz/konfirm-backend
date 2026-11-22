@@ -1,4 +1,12 @@
-import { HttpMailer, LogMailer, mailerFromEnv, UnconfiguredMailer } from './mailer';
+import {
+  HttpMailer,
+  LogMailer,
+  mailerFromEnv,
+  UnconfiguredMailer,
+  paymentConfirmedMail,
+  paymentHeldMail,
+  referralEarnedMail,
+} from './mailer';
 
 describe('mailerFromEnv', () => {
   it('uses the HTTP relay when a webhook is configured', () => {
@@ -63,5 +71,66 @@ describe('HttpMailer', () => {
     const [, init] = fetchMock.mock.calls[0];
     expect(init.headers.Authorization).toBe('Bearer secret-token');
     expect(JSON.parse(init.body)).toEqual({ to: 'a@b.co', subject: 's', text: 't' });
+  });
+});
+
+describe('paymentConfirmedMail', () => {
+  it('addresses the merchant and includes the amount/currency in subject and body', () => {
+    const mail = paymentConfirmedMail({
+      merchantEmail: 'merchant@example.com',
+      amount: '10.00',
+      currency: 'USDC',
+      reference: 'ref-123',
+    });
+    expect(mail.to).toBe('merchant@example.com');
+    expect(mail.subject).toContain('10.00');
+    expect(mail.subject).toContain('USDC');
+    expect(mail.text).toContain('ref-123');
+  });
+});
+
+describe('paymentHeldMail', () => {
+  it('includes the hold reason when provided', () => {
+    const mail = paymentHeldMail({
+      merchantEmail: 'merchant@example.com',
+      amount: '5.00',
+      currency: 'USDC',
+      reference: 'ref-456',
+      reason: 'compliance review',
+    });
+    expect(mail.text).toContain('compliance review');
+    expect(mail.subject).toContain('held');
+  });
+
+  it('omits the reason line when reason is undefined', () => {
+    const mail = paymentHeldMail({
+      merchantEmail: 'merchant@example.com',
+      amount: '5.00',
+      currency: 'USDC',
+      reference: 'ref-457',
+    });
+    expect(mail.text).not.toContain('Reason:');
+  });
+});
+
+describe('referralEarnedMail', () => {
+  it('includes the reward amount and referred merchant name when provided', () => {
+    const mail = referralEarnedMail({
+      merchantEmail: 'referrer@example.com',
+      rewardAmount: '1.00',
+      currency: 'USDC',
+      referredMerchant: 'Acme Corp',
+    });
+    expect(mail.subject).toContain('1.00');
+    expect(mail.text).toContain('Acme Corp');
+  });
+
+  it('omits the referred merchant line when not provided', () => {
+    const mail = referralEarnedMail({
+      merchantEmail: 'referrer@example.com',
+      rewardAmount: '1.00',
+      currency: 'USDC',
+    });
+    expect(mail.text).not.toContain('Referred merchant:');
   });
 });
