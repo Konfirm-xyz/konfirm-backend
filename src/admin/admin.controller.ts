@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { ApiBody, ApiCookieAuth, ApiOperation, ApiParam, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { z } from 'zod';
 import { ZodValidationPipe } from '../zod-validation.pipe';
@@ -142,13 +142,14 @@ export class AdminController {
   // --- Merchants ---
 
   @Get('merchants')
-  @ApiOperation({ summary: 'List all merchants', description: 'All merchants, newest first. Supports pagination.' })
+  @ApiOperation({ summary: 'List all merchants', description: 'All merchants, newest first. Filter by status, paginate with limit/offset.' })
+  @ApiQuery({ name: 'status', required: false, type: 'string', description: 'Filter by status: pending | active | suspended' })
   @ApiQuery({ name: 'limit', required: false, type: 'number', description: 'Max results (default 50)' })
   @ApiQuery({ name: 'offset', required: false, type: 'number', description: 'Pagination offset' })
   @ApiResponse({ status: 200, description: 'Array of merchant records.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  listMerchants(@Query('limit') limit?: string, @Query('offset') offset?: string) {
-    return this.merchants.list(parsePaginationInt(limit), parsePaginationInt(offset));
+  listMerchants(@Query('status') status?: string, @Query('limit') limit?: string, @Query('offset') offset?: string) {
+    return this.merchants.list(status, parsePaginationInt(limit), parsePaginationInt(offset));
   }
 
   @Post('merchants/:id/password-reset')
@@ -524,13 +525,18 @@ export class AdminController {
   // --- Pay links ---
 
   @Get('links')
-  @ApiOperation({ summary: 'List all payment links', description: 'Payment links across every merchant, newest first.' })
+  @ApiOperation({ summary: 'List all payment links', description: 'Payment links across every merchant, newest first. Filter by active.' })
+  @ApiQuery({ name: 'active', required: false, type: 'boolean', description: 'Filter by active flag: true | false' })
   @ApiQuery({ name: 'limit', required: false, type: 'number' })
   @ApiQuery({ name: 'offset', required: false, type: 'number' })
   @ApiResponse({ status: 200, description: 'Array of link records.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  listLinks(@Query('limit') limit?: string, @Query('offset') offset?: string) {
-    return this.links.list(parsePaginationInt(limit), parsePaginationInt(offset));
+  listLinks(@Query('active') active?: string, @Query('limit') limit?: string, @Query('offset') offset?: string) {
+    if (active !== undefined && active !== '' && active !== 'true' && active !== 'false') {
+      throw new BadRequestException('active must be true or false');
+    }
+    const activeFilter = active === 'true' ? true : active === 'false' ? false : undefined;
+    return this.links.list(activeFilter, parsePaginationInt(limit), parsePaginationInt(offset));
   }
 
   // --- Blockchain status ---
