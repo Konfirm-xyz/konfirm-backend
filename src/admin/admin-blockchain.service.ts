@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { Horizon, rpc } from '@stellar/stellar-sdk';
 import { withRetry } from '../common/retry';
 import { HORIZON_URL, RPC_URL } from '../common/stellar-network';
@@ -24,6 +24,7 @@ const CONTRACTS = [
 
 @Injectable()
 export class AdminBlockchainService {
+  private readonly logger = new Logger(AdminBlockchainService.name);
   private horizon = new Horizon.Server(HORIZON_URL);
   private rpcServer = new rpc.Server(RPC_URL);
 
@@ -33,6 +34,14 @@ export class AdminBlockchainService {
       this.pingRpc(),
       checkComplianceCanary(),
     ]);
+
+    // backend#328: surface chain-read failures in logs, not only as flipped booleans.
+    const reads = { 'facilitator account': facilitatorResult, 'RPC ping': rpcResult, 'compliance canary': complianceCanary };
+    for (const [label, result] of Object.entries(reads)) {
+      if (result.status === 'rejected') {
+        this.logger.warn(`${label} read failed: ${(result.reason as Error)?.message ?? result.reason}`);
+      }
+    }
 
     return {
       network: 'testnet',
