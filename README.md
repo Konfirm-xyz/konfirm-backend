@@ -30,6 +30,16 @@ Cashing out to a bank account is a real SEP-10 (auth) + SEP-24 (interactive with
 - The [`stellar` CLI](https://developers.stellar.org/docs/tools/cli/install-cli), on `PATH`, with a `deployer` identity configured (`stellar keys add deployer --secret-key ...`) — needed by the reconciler's on-chain compliance check (`compliance.rs`, still CLI-shelled) and, locally only, as a convenience fallback if `STELLAR_DEPLOYER_SECRET_KEY` is unset (`x402.service.ts` resolves the facilitator's signing key via `stellar keys secret deployer` in that case). The API's own compliance checks (`payments.service.ts`, `x402.service.ts`) call the compliance contract directly over Soroban RPC — no CLI involved — see [Compliance](#compliance) below.
 - [Freighter](https://www.freighter.app/) browser extension, set to Testnet, for exercising checkout yourself
 
+## Repository settings
+
+`.github/settings.yml` declares `has_wiki: false` (#119) and
+`delete_branch_on_merge: true` (#120), but it is only applied when the
+[Settings App](https://github.com/apps/settings) is installed on this repo.
+It is **not** currently applied — the live repo still has the wiki enabled and
+does not delete merged branches. An org admin must install the app or run the
+`gh api -X PATCH` command documented at the top of that file, then verify with
+`gh api repos/Konfirm-xyz/konfirm-backend --jq '{has_wiki, delete_branch_on_merge}'`.
+
 ## Setup
 
 ```bash

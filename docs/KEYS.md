@@ -13,6 +13,7 @@ Four identities matter. Keep them separate.
 
 - The facilitator never falls back to the deployer key in production. Production needs `FACILITATOR_KMS_KEY_ID` or `FACILITATOR_SECRET_KEY`, or it throws on the first signing attempt.
 - At boot, `assertSeparateHotKeys()` refuses to start if the deployer, facilitator, and fee secrets resolve to the same account (`src/common/facilitator-signer.ts`).
+- Also at boot, `assertKmsFacilitatorIsSeparateAtBoot()` derives the KMS facilitator address (when `FACILITATOR_KMS_KEY_ID` is set) and refuses to start if it collides with the deployer or platform-fee identity.
 
 ## Admin rotation (updated 2026-10-25 — route 2 below has shipped)
 

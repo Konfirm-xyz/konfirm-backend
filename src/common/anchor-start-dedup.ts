@@ -8,8 +8,23 @@ import { AnchorInteractiveSession } from './anchor-client';
 // to one anchor call. Same idea as x402.service.ts's idempotencyKey, plus an
 // advisory lock (fees.service.ts's createSettlement pattern) so two
 // *concurrent* requests serialize instead of both missing the lookup.
+//
+// The lock is a session-level advisory lock on a dedicated connection, not a
+// transaction-scoped one: the anchor call is a real outbound HTTP request
+// (up to its own 10s timeout), and holding a pooled connection plus an open
+// transaction across it would starve the whole pool (default max 10) on a
+// handful of concurrent starts. So the connection is released before
+// `start()` runs and re-acquired only to record the result.
 export function startIdempotencyKey(direction: string, account: string, currency: string, token: string): string {
   return createHash('sha256').update(JSON.stringify([direction, account, currency, token])).digest('hex');
+}
+
+async function findSession(key: string): Promise<AnchorInteractiveSession | undefined> {
+  const { rows } = await pool.query<{ session: AnchorInteractiveSession }>(
+    'SELECT session FROM anchor_interactive_sessions WHERE idempotency_key = $1',
+    [key],
+  );
+  return rows[0]?.session;
 }
 
 export async function startInteractiveOnce(
@@ -20,30 +35,28 @@ export async function startInteractiveOnce(
   start: () => Promise<AnchorInteractiveSession>,
 ): Promise<AnchorInteractiveSession> {
   const key = startIdempotencyKey(direction, account, currency, token);
-  const client = await pool.connect();
+  const cached = await findSession(key);
+  if (cached) return cached;
+
+  // Held only for the duration of the anchor call, on its own connection, so
+  // a concurrent duplicate waits here instead of calling the anchor twice.
+  const lockClient = await pool.connect();
   try {
-    await client.query('BEGIN');
-    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`anchor-start:${key}`]);
-    const existing = await client.query<{ session: AnchorInteractiveSession }>(
-      'SELECT session FROM anchor_interactive_sessions WHERE idempotency_key = $1',
-      [key],
-    );
-    if (existing.rows[0]) {
-      await client.query('COMMIT');
-      return existing.rows[0].session;
+    await lockClient.query('SELECT pg_advisory_lock(hashtext($1))', [`anchor-start:${key}`]);
+    try {
+      const existing = await findSession(key);
+      if (existing) return existing;
+      const session = await start();
+      await pool.query(
+        `INSERT INTO anchor_interactive_sessions (idempotency_key, direction, session) VALUES ($1, $2, $3)
+         ON CONFLICT (idempotency_key) DO NOTHING`,
+        [key, direction, JSON.stringify(session)],
+      );
+      return session;
+    } finally {
+      await lockClient.query('SELECT pg_advisory_unlock(hashtext($1))', [`anchor-start:${key}`]).catch(() => undefined);
     }
-    const session = await start();
-    await client.query(
-      `INSERT INTO anchor_interactive_sessions (idempotency_key, direction, session) VALUES ($1, $2, $3)
-       ON CONFLICT (idempotency_key) DO NOTHING`,
-      [key, direction, JSON.stringify(session)],
-    );
-    await client.query('COMMIT');
-    return session;
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => undefined);
-    throw err;
   } finally {
-    client.release();
+    lockClient.release();
   }
 }
