@@ -78,7 +78,7 @@ export class X402Controller {
       'Rate-limited to 20 req/min (Soroban RPC round-trip). Unauthenticated.',
   })
   @ApiBody(zodBody(x402RequestSchema, 'x402 verify request'))
-  @ApiResponse({ status: 200 | 201, description: 'Verification result (success or failure with reason).' })
+  @ApiResponse({ status: 201, description: 'Verification result (success or failure with reason).' })
   @ApiResponse({ status: 422, description: 'Malformed request body.' })
   verify(@Body(new ZodValidationPipe(x402RequestSchema)) body: X402Request) {
     return this.x402.verify(
@@ -96,7 +96,7 @@ export class X402Controller {
       'Rate-limited to 20 req/min. Unauthenticated.',
   })
   @ApiBody(zodBody(x402RequestSchema, 'x402 settle request'))
-  @ApiResponse({ status: 200 | 201, description: 'Settlement result.' })
+  @ApiResponse({ status: 201, description: 'Settlement result.' })
   @ApiResponse({ status: 422, description: 'Malformed request body.' })
   settle(@Body(new ZodValidationPipe(x402RequestSchema)) body: X402Request) {
     return this.x402.settle(

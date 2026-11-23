@@ -63,7 +63,7 @@ export class WithdrawalsController {
     description: 'Submits the merchant-signed SEP-10 challenge to the anchor and returns a short-lived JWT for the subsequent SEP-24 flow.',
   })
   @ApiBody(zodBody(tokenSchema, 'Signed SEP-10 challenge transaction'))
-  @ApiResponse({ status: 200 | 201, description: 'Anchor JWT token.' })
+  @ApiResponse({ status: 201, description: 'Anchor JWT token.' })
   @ApiResponse({ status: 400, description: 'Invalid or malformed challenge transaction.' })
   @ApiResponse({ status: 401, description: 'Not authenticated.' })
   token(@Body(new ZodValidationPipe(tokenSchema)) body: z.infer<typeof tokenSchema>) {
@@ -79,7 +79,7 @@ export class WithdrawalsController {
       '(a tracking-insert failure never blocks the cash-out).',
   })
   @ApiBody(zodBody(startSchema, 'Start withdrawal request'))
-  @ApiResponse({ status: 200 | 201, description: 'Anchor interactive URL and transaction ID.' })
+  @ApiResponse({ status: 201, description: 'Anchor interactive URL and transaction ID.' })
   @ApiResponse({ status: 400, description: 'Invalid token or no Stellar address on file.' })
   @ApiResponse({ status: 401, description: 'Not authenticated.' })
   async start(@Body(new ZodValidationPipe(startSchema)) body: z.infer<typeof startSchema>, @Req() req: AuthedRequest) {
@@ -128,7 +128,7 @@ export class WithdrawalsController {
       "from the merchant's account to the anchor. The merchant signs this in Freighter and submits it.",
   })
   @ApiBody(zodBody(prepareSchema, 'Prepare withdrawal payment request'))
-  @ApiResponse({ status: 200 | 201, description: 'Unsigned XDR payment transaction.' })
+  @ApiResponse({ status: 201, description: 'Unsigned XDR payment transaction.' })
   @ApiResponse({ status: 400, description: 'Anchor not yet ready or invalid parameters.' })
   @ApiResponse({ status: 401, description: 'Not authenticated.' })
   async preparePayment(

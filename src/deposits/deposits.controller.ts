@@ -61,7 +61,7 @@ export class DepositsController {
     description: 'Testnet-only. Unauthenticated.',
   })
   @ApiBody(zodBody(tokenSchema, 'Signed SEP-10 challenge transaction'))
-  @ApiResponse({ status: 200 | 201, description: 'Anchor JWT token.' })
+  @ApiResponse({ status: 201, description: 'Anchor JWT token.' })
   @ApiResponse({ status: 404, description: 'Faucet not enabled.' })
   token(@Body(new ZodValidationPipe(tokenSchema)) body: z.infer<typeof tokenSchema>) {
     return this.deposits.exchangeToken(body.transaction);
@@ -75,7 +75,7 @@ export class DepositsController {
       'Returns the anchor-hosted interactive URL. Testnet-only. Unauthenticated.',
   })
   @ApiBody(zodBody(startSchema, 'Start deposit request'))
-  @ApiResponse({ status: 200 | 201, description: 'Anchor interactive URL and transaction ID.' })
+  @ApiResponse({ status: 201, description: 'Anchor interactive URL and transaction ID.' })
   @ApiResponse({ status: 404, description: 'Faucet not enabled.' })
   start(@Body(new ZodValidationPipe(startSchema)) body: z.infer<typeof startSchema>) {
     return this.deposits.startDeposit(body.token, body.currency, body.account);
@@ -107,7 +107,7 @@ export class DepositsController {
       'Used by the testnet harness scripts for exercising payments outside the browser. Testnet-only.',
   })
   @ApiBody(zodBody(transferSchema, 'Transfer payment request'))
-  @ApiResponse({ status: 200 | 201, description: 'Unsigned XDR payment transaction.' })
+  @ApiResponse({ status: 201, description: 'Unsigned XDR payment transaction.' })
   @ApiResponse({ status: 404, description: 'Faucet not enabled.' })
   prepareTransfer(@Body(new ZodValidationPipe(transferSchema)) body: z.infer<typeof transferSchema>) {
     return this.deposits.prepareTransferPayment(body.from, body.to, body.currency, body.amount);
