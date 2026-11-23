@@ -19,8 +19,8 @@ export class AdminFeesController {
       'Owed platform fee totals grouped by merchant and asset, including whether the merchant ' +
       'has any disputed settlements. Enforcement is visibility + suspension, not an automatic block.',
   })
-  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Max rows to return (default 50, max 200).' })
-  @ApiQuery({ name: 'offset', required: false, type: Number, description: 'Rows to skip (default 0).' })
+  @ApiQuery({ name: 'limit', required: false, type: 'number', description: 'Max rows to return (default 50, max 200).' })
+  @ApiQuery({ name: 'offset', required: false, type: 'number', description: 'Rows to skip (default 0).' })
   @ApiResponse({ status: 200, description: 'Array of { merchant_id, name, email, status, asset_code, amount, payments, oldest_owed_at, has_disputed_settlement }.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
   async owed(@Query('limit') limit?: string, @Query('offset') offset?: string) {

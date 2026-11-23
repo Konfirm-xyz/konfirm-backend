@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { pool } from '../db/pool';
+import { ADMIN_MAX_LIMIT } from './admin.constants';
 
 export interface OwedFeesRow {
   merchant_id: string;
@@ -43,7 +44,7 @@ export interface OwedFeesResult {
 }
 
 const DEFAULT_LIMIT = 50;
-const MAX_LIMIT = 200;
+const MAX_LIMIT = ADMIN_MAX_LIMIT;
 
 function normalizeLimit(limit?: number): number {
   if (limit === undefined || limit === null || Number.isNaN(limit)) {

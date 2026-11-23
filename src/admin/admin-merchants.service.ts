@@ -3,13 +3,21 @@ import { pool } from '../db/pool';
 
 @Injectable()
 export class AdminMerchantsService {
-  async list(limit = 50, offset = 0) {
+  async list(status?: string, limit = 50, offset = 0) {
+    const params: unknown[] = [];
+    let where = '';
+    if (status) {
+      params.push(status);
+      where = `WHERE status = $${params.length}`;
+    }
+    params.push(limit, offset);
     const { rows } = await pool.query(
       `SELECT id, email, name, status, risk_tier, fee_bps, stellar_base_address, created_at
        FROM merchants
+       ${where}
        ORDER BY created_at DESC
-       LIMIT $1 OFFSET $2`,
-      [limit, offset],
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params,
     );
     return rows;
   }

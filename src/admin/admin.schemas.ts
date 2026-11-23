@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { ADMIN_MAX_LIMIT } from './admin.constants';
 
 /**
  * Shared query-param schemas for admin list endpoints.
@@ -9,7 +10,7 @@ import { z } from 'zod';
  * previously surfaced as opaque 500s from the `pg` driver).
  */
 
-const MAX_LIMIT = 1000;
+const MAX_LIMIT = ADMIN_MAX_LIMIT;
 const MAX_OFFSET = 1_000_000;
 const MAX_DAYS = 3650;
 
