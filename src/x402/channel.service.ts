@@ -84,6 +84,16 @@ export class ChannelService {
       return { accepted: false, reason: 'channel_not_open' };
     }
 
+    // Re-screen compliance per claim (#370).  openChannel() checks once at
+    // channel-open time, but a payer can be blocked after a channel is open
+    // and claim()/checkpoint() would run forever against them without this.
+    // Every other payment path (checkout's isPayerAllowed, single-shot x402
+    // verify/settle) screens per-transaction; channels must match.
+    const { rows: blocked } = await pool.query('SELECT 1 FROM blocked_addresses WHERE stellar_address = $1', [row.payer_pubkey]);
+    if (blocked.length > 0 || !(await isAllowedOnChain(row.payer_pubkey))) {
+      return { accepted: false, reason: 'compliance_blocked' };
+    }
+
     const pendingAmount = BigInt(row.pending_amount);
     const pendingNonce = BigInt(row.pending_nonce);
     const deposited = BigInt(row.deposited);
