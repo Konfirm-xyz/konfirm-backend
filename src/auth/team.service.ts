@@ -59,6 +59,16 @@ export class TeamService {
       throw new ForbiddenException('only owners can invite team members');
     }
 
+    // Reject a self-invite: the target email must not match the merchant's own
+    // direct-login email, which is never stored in merchant_members itself.
+    const { rows: merchantRows } = await pool.query(
+      `SELECT email FROM merchants WHERE id = $1`,
+      [merchantId],
+    );
+    if (merchantRows[0]?.email && merchantRows[0].email.toLowerCase() === email.toLowerCase()) {
+      throw new ConflictException('cannot invite your own account email');
+    }
+
     // Reject if the email is already an active member.
     const { rows: existingMember } = await pool.query(
       `SELECT id FROM merchant_members WHERE merchant_id = $1 AND email = $2`,
