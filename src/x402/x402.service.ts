@@ -9,6 +9,18 @@ import { isAllowedOnChain } from '../common/onchain-compliance';
 import { getFacilitatorSigner, withFacilitatorSubmissionLock } from '../common/facilitator-signer';
 import { NETWORK_CAIP2 } from '../common/stellar-network';
 
+// Optional X402_INCLUSION_FEE_STROOPS override for ExactStellarScheme's
+// inclusion fee bid (package default 100 — often too low on mainnet).
+function x402InclusionFeeOption(): { inclusionFeeStroops?: number } {
+  const raw = process.env.X402_INCLUSION_FEE_STROOPS;
+  if (!raw) return {};
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`X402_INCLUSION_FEE_STROOPS must be a positive integer, got "${raw}"`);
+  }
+  return { inclusionFeeStroops: value };
+}
+
 @Injectable()
 export class X402Service implements OnModuleInit {
   private readonly logger = new Logger(X402Service.name);
@@ -23,6 +35,7 @@ export class X402Service implements OnModuleInit {
     const signer = await getFacilitatorSigner();
     this.scheme = new ExactStellarScheme([signer], {
       rpcConfig: { url: RPC_URL },
+      ...x402InclusionFeeOption(),
     });
     this.logger.log(`x402 facilitator ready, signing address ${signer.address}`);
   }

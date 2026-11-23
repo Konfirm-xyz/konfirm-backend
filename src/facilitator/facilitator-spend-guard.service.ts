@@ -89,6 +89,11 @@ export class FacilitatorSpendGuardService implements OnModuleInit {
   }
 
   async checkAndRecordSpend(amountUsdc: number, operation: string, reference?: string): Promise<void> {
+    // Defense at this function's own boundary: a negative or NaN amount would
+    // silently lower the recorded daily total and undermine the cap.
+    if (!Number.isFinite(amountUsdc) || amountUsdc < 0) {
+      throw new Error(`checkAndRecordSpend: invalid amountUsdc ${amountUsdc}`);
+    }
     const client = await pool.connect();
     let transactionOpen = false;
     try {

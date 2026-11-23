@@ -34,6 +34,7 @@ export interface VerifyResponse {
   invalidMessage?: string;
   payer?: string;
   extensions?: Record<string, unknown>;
+  extensionResponses?: Record<string, unknown>;
   extra?: Record<string, unknown>;
 }
 
@@ -46,6 +47,7 @@ export interface SettleResponse {
   network: Network;
   amount?: string;
   extensions?: Record<string, unknown>;
+  extensionResponses?: Record<string, unknown>;
   extra?: Record<string, unknown>;
 }
 
