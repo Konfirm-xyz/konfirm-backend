@@ -1,3 +1,5 @@
+-- 028_facilitator_spend_cap.up.sql
+--
 -- DB-backed operational config for the facilitator daily spend cap.
 -- Mirrors the facilitator_state pattern: a single-row table holding the
 -- current override. When no row exists (or cap_usdc is NULL), the spend

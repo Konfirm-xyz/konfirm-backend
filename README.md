@@ -316,7 +316,12 @@ real Stellar testnet and Friendbot availability.
 npm run migrate:up            # applies every pending .up.sql, in order
 npm run migrate:down          # reverts the most recently applied migration
 npm run migrate:down -- 3     # reverts the last 3
+npm run migrate:check         # fails if two migrations share a numeric prefix
 ```
+
+Prefixes must be unique: `migrate:up` (and the `migrate:check` CI step) refuses to run when two files
+share one, because the tie would be broken by file name rather than by when the migration actually
+landed.
 
 Each migration is a `NNN_name.up.sql` / `NNN_name.down.sql` pair — `db/migrate.ts` tracks what's been
 applied in a `schema_migrations` table, so `up` only ever runs what's actually pending (safe to run

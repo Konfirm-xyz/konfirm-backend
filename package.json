@@ -10,6 +10,7 @@
     "test:live": "jest --selectProjects live",
     "migrate:up": "ts-node -r tsconfig-paths/register db/migrate.ts up",
     "migrate:down": "ts-node -r tsconfig-paths/register db/migrate.ts down",
+    "migrate:check": "ts-node -r tsconfig-paths/register db/migrate.ts check",
     "seed:admin": "ts-node -r tsconfig-paths/register db/seed-admin.ts"
   },
   "dependencies": {

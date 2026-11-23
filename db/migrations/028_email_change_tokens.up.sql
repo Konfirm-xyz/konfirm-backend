@@ -1,3 +1,5 @@
+-- 028_email_change_tokens.up.sql
+--
 -- Email-change verification tokens (issue #38).
 --
 -- When a merchant requests an email address change, a short-lived, single-use

@@ -34,11 +34,35 @@ async function ensureTrackingTable(): Promise<void> {
   `);
 }
 
+// Two files sharing a numeric prefix (e.g. three `023_*`, five `028_*`) sort
+// by their name suffix, so a fresh build applies them in an order that has
+// nothing to do with when they actually landed — and can't be reconciled with
+// the order production already applied them in. Prefixes must be unique.
+export function findDuplicatePrefixes(files: string[]): Map<string, string[]> {
+  const byPrefix = new Map<string, string[]>();
+  for (const file of files) {
+    const match = /^(\d+)_/.exec(file);
+    if (!match) continue;
+    const group = byPrefix.get(match[1]) ?? [];
+    group.push(file);
+    byPrefix.set(match[1], group);
+  }
+  return new Map([...byPrefix].filter(([, group]) => group.length > 1));
+}
+
+export function assertUniquePrefixes(files: string[]): void {
+  const duplicates = findDuplicatePrefixes(files);
+  if (duplicates.size === 0) return;
+  const detail = [...duplicates]
+    .map(([prefix, group]) => `  ${prefix}: ${group.join(', ')}`)
+    .join('\n');
+  throw new Error(`duplicate migration prefixes — renumber so each prefix is unique:\n${detail}`);
+}
+
 function pendingUpFiles(applied: Set<string>): string[] {
-  return readdirSync(MIGRATIONS_DIR)
-    .filter((f) => f.endsWith('.up.sql'))
-    .sort()
-    .filter((f) => !applied.has(f.replace(/\.up\.sql$/, '')));
+  const files = readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith('.up.sql'));
+  assertUniquePrefixes(files);
+  return files.sort().filter((f) => !applied.has(f.replace(/\.up\.sql$/, '')));
 }
 
 // The migration's own SQL and its tracking-table record land in the same
@@ -141,8 +165,13 @@ async function main(): Promise<void> {
     await up();
   } else if (cmd === 'down') {
     await down(arg ? Number(arg) : 1);
+  } else if (cmd === 'check') {
+    // No database needed: CI runs this before `up` so a duplicate prefix
+    // fails the build with a clear message instead of a confusing apply order.
+    assertUniquePrefixes(readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith('.up.sql')));
+    console.log('migration prefixes are unique.');
   } else {
-    console.error('usage: ts-node db/migrate.ts <up|down> [steps]');
+    console.error('usage: ts-node db/migrate.ts <up|down|check> [steps]');
     process.exitCode = 1;
     return;
   }

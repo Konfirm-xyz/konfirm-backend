@@ -1,3 +1,5 @@
+-- 023_link_idempotency.up.sql
+--
 -- Idempotent link creation. A client that times out on POST /links can retry
 -- with the same idempotency_key and get the original row back, instead of a
 -- second, independently payable link.
