@@ -10,7 +10,7 @@ reqwest = { version = "0.13.4", features = ["json"] }
 rust_decimal = { version = "1.42.1", features = ["std"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-soroban-client = "0.6.0"
+soroban-client = "0.7.1"
 sqlx = { version = "0.9.0", default-features = false, features = ["chrono", "postgres", "runtime-tokio", "rust_decimal", "tls-rustls", "uuid"] }
 stellar-strkey = "0.0.18"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time"] }
