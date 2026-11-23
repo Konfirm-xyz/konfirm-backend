@@ -18,7 +18,12 @@ const transferSchema = z.object({
   from: z.string().regex(/^G[A-Z2-7]{55}$/),
   to: z.string().regex(/^G[A-Z2-7]{55}$/),
   currency: z.enum(['XLM', 'USDC']),
-  amount: nonNegativeDecimalStringSchema('amount', 7, 9_223_372_036_854_775_807n),
+  // amount=0 is unpayable: the Stellar SDK rejects Operation.payment({ amount: "0" })
+  // — same fix applied to createLinkSchema in links.controller.ts (closed #64).
+  amount: nonNegativeDecimalStringSchema('amount', 7, 9_223_372_036_854_775_807n).refine(
+    (value) => Number(value) > 0,
+    'amount must be greater than 0',
+  ),
 });
 
 // No AuthGuard anywhere here — this exists to get test funds into *any*
