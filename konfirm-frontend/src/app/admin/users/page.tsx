@@ -1,7 +1,4 @@
-"use client";
 
-import { useEffect, useState } from "react";
-import { api } from "@/lib/api";
 
 interface AdminUser {
   id: string;

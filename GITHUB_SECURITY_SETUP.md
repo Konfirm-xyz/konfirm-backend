@@ -19,7 +19,7 @@ Branch protection prevents accidental or malicious modifications to the main bra
    - ✓ Require status checks to pass before merging
    - ✓ Require branches to be up to date before merging
    - ✓ Dismiss stale pull request approvals when new commits are pushed
-   - ✓ Include administrators (recommended)
+   - ✓ Include administrators (required — see #268)
    - ✓ Restrict who can push to matching branches
    - ✓ Allow force pushes → None
    - ✓ Allow deletions → unchecked
@@ -29,10 +29,18 @@ Branch protection prevents accidental or malicious modifications to the main bra
 
 6. Click "Create" to save the rule
 
+The same rule is declared in `.github/settings.yml` (`branches[0].protection`)
+so the Settings app keeps it in sync. `enforce_admins` is `true` and there is
+no bypass list: admins are subject to the required review and the `test`
+check exactly like everyone else. Do not re-enable "Do not require
+administrators" or add an admin bypass — that reopens #268.
+
 **Verification:**
 - Try to push directly to main → should be rejected
 - Create a PR but don't wait for CI → merge button should be disabled
 - Merge a PR after CI passes → should succeed
+- As an admin, open a PR with a failing/absent `test` check → merge must be
+  rejected (no "Merge without waiting for requirements" / bypass option)
 
 ---
 
