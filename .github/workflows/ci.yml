@@ -64,6 +64,9 @@ jobs:
       - name: Type check
         run: npx tsc --noEmit -p .
 
+      - name: Build
+        run: npm run build
+
       # Fast suite: unit and e2e specs that only touch the local Postgres.
       # This gates the merge.
       - name: Run tests
