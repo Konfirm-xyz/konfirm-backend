@@ -33,7 +33,7 @@ export class SessionsController {
   @ApiParam({ name: 'linkId', description: 'Payment link UUID', type: 'string' })
   @ApiBody(zodBody(reserveSchema, 'Reserve session request'))
   @ApiResponse({ status: 201, description: 'Session reserved.' })
-  @ApiResponse({ status: 400, description: 'Invalid muxed_id format (must be stringified u64).' })
+  @ApiResponse({ status: 400, description: 'Invalid muxed_id format (must be stringified u64), or the link is not payable (inactive, expired, or merchant suspended).' })
   @ApiResponse({ status: 404, description: 'Link not found.' })
   @ApiResponse({ status: 409, description: 'muxed_id already reserved for this link — retry with a new ID.' })
   reserve(

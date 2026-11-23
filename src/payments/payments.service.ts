@@ -8,6 +8,7 @@ import { getEffectiveFeeBps } from '../common/effective-fee';
 import { platformFeeAddress } from '../common/platform-fee';
 import { feeStroops, fromStroops, platformFeeFloor, toStroops } from '../common/money-rules';
 import { HORIZON_URL, NETWORK_PASSPHRASE } from '../common/stellar-network';
+import { assertLinkPayable } from '../common/payable-link';
 
 
 @Injectable()
@@ -42,10 +43,8 @@ export class PaymentsService {
     );
     if (linkRes.rows.length === 0) throw new NotFoundException('link not found');
     const link = linkRes.rows[0];
-    if (!link.active) throw new BadRequestException('link is not active');
-    if (link.expires_at && new Date(link.expires_at) < new Date()) {
-      throw new BadRequestException('link has expired');
-    }
+    // active / expiry / suspended-merchant — shared with SessionsService.reserve().
+    assertLinkPayable(link);
     // A single-use link (reusable = false) accepts exactly one confirmed
     // payment. The reconciler deactivates it after that payment lands, but
     // we guard here too so concurrent checkout attempts against an already-
@@ -64,14 +63,6 @@ export class PaymentsService {
     }
     if (!link.stellar_base_address) {
       throw new BadRequestException('merchant has no Stellar address configured');
-    }
-    // A suspended merchant's links stop accepting payment immediately — the
-    // real teeth of a suspension, not just locking them out of their own
-    // dashboard (see auth.guard.ts). Not restricted to merchant_status =
-    // 'active': a 'pending' (not yet email-verified) merchant can still log
-    // in and accept payments — only 'suspended' blocks checkout.
-    if (link.merchant_status === 'suspended') {
-      throw new BadRequestException('this merchant is not currently accepting payments');
     }
     return link;
   }
