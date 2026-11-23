@@ -1,4 +1,4 @@
-import { Networks } from '@stellar/stellar-sdk';
+import { Networks, StrKey } from '@stellar/stellar-sdk';
 import { DEFAULT_TESTNET_RPC_URL, USDC_TESTNET_ADDRESS } from '@x402/stellar';
 import assets from './stellar-assets.json';
 
@@ -154,10 +154,73 @@ export function missingForNetwork(network: StellarNetworkName = STELLAR_NETWORK,
   return required.filter(([, v]) => !v).map(([name]) => name);
 }
 
+// Expected strkey type for each identifier that must be a Stellar strkey.
+// 'account' is a G... ed25519 public key, 'contract' a C... contract ID.
+const STRKEY_KINDS = {
+  usdcIssuer: 'account',
+  eurcIssuer: 'account',
+  usdcSacId: 'contract',
+  x402UsdcAddress: 'contract',
+  compliance: 'contract',
+  payment: 'contract',
+  treasury: 'contract',
+  channel: 'contract',
+  deployer: 'account',
+  facilitator: 'account',
+  complianceCanary: 'account',
+} as const satisfies Record<string, 'account' | 'contract'>;
+
+function isStrkeyOfKind(value: string, kind: 'account' | 'contract'): boolean {
+  try {
+    return kind === 'account' ? StrKey.isValidEd25519PublicKey(value) : StrKey.isValidContract(value);
+  } catch {
+    return false;
+  }
+}
+
+// Every strkey-shaped identifier that is set (env override or preset) must be a
+// syntactically valid strkey of the expected type. Applies to testnet too, so a
+// malformed override fails boot instead of surfacing later as a confusing
+// Horizon/Soroban error.
+export function invalidStrkeysForNetwork(
+  network: StellarNetworkName = STELLAR_NETWORK,
+  env: NodeJS.ProcessEnv = process.env,
+): Array<{ name: string; value: string; expected: 'account' | 'contract' }> {
+  const preset = PRESETS[network];
+  const values: Record<keyof typeof STRKEY_KINDS, string | undefined> = {
+    usdcIssuer: env[ENV_NAMES.usdcIssuer] || preset.usdcIssuer,
+    eurcIssuer: env[ENV_NAMES.eurcIssuer] || preset.eurcIssuer,
+    usdcSacId: env[ENV_NAMES.usdcSacId] || preset.usdcSacId,
+    x402UsdcAddress: env[ENV_NAMES.x402UsdcAddress] || preset.x402UsdcAddress,
+    compliance: env[ENV_NAMES.compliance] || preset.contracts.compliance,
+    payment: env[ENV_NAMES.payment] || preset.contracts.payment,
+    treasury: env[ENV_NAMES.treasury] || preset.contracts.treasury,
+    channel: env[ENV_NAMES.channel] || preset.contracts.channel,
+    deployer: env[ENV_NAMES.deployer] || preset.deployer,
+    facilitator: env[ENV_NAMES.facilitator] || preset.facilitator,
+    complianceCanary: env[ENV_NAMES.complianceCanary],
+  };
+  const invalid: Array<{ name: string; value: string; expected: 'account' | 'contract' }> = [];
+  for (const [key, expected] of Object.entries(STRKEY_KINDS) as Array<[keyof typeof STRKEY_KINDS, 'account' | 'contract']>) {
+    const value = values[key];
+    if (value && !isStrkeyOfKind(value, expected)) {
+      invalid.push({ name: ENV_NAMES[key], value, expected });
+    }
+  }
+  return invalid;
+}
+
 export function assertNetworkReady(network: StellarNetworkName = STELLAR_NETWORK, env: NodeJS.ProcessEnv = process.env): void {
   const missing = missingForNetwork(network, env);
   if (missing.length > 0) {
     throw new Error(`STELLAR_NETWORK=${network} needs these set explicitly: ${missing.join(', ')}`);
+  }
+  const invalid = invalidStrkeysForNetwork(network, env);
+  if (invalid.length > 0) {
+    const detail = invalid
+      .map(({ name, value, expected }) => `${name}="${value}" is not a valid Stellar ${expected} strkey (expected ${expected === 'account' ? 'G...' : 'C...'})`)
+      .join('; ');
+    throw new Error(`STELLAR_NETWORK=${network} has invalid identifiers: ${detail}`);
   }
 }
 
