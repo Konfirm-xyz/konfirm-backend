@@ -340,6 +340,46 @@ export class AuthService {
     this.logger.log(`password reset completed for merchant ${merchantId}`);
   }
 
+  // Self-service password rotation for an authenticated merchant. Requires current
+  // password. Bumps session_version to invalidate all other active sessions server-side,
+  // and issues a fresh JWT with the incremented session_version.
+  async changePassword(merchantId: string, currentPassword: string, newPassword: string): Promise<{ token: string; merchant: MerchantClaims }> {
+    const { rows } = await pool.query(
+      'SELECT id, email, name, stellar_base_address, password_hash, status, session_version FROM merchants WHERE id = $1',
+      [merchantId],
+    );
+    if (rows.length === 0) {
+      throw new UnauthorizedException('session expired or invalid — please log in again');
+    }
+    const row = rows[0];
+    if (row.status === 'suspended') {
+      throw new ForbiddenException('this account has been suspended — contact support');
+    }
+    const ok = await bcrypt.compare(currentPassword, row.password_hash);
+    if (!ok) {
+      throw new BadRequestException('current password is incorrect');
+    }
+    if (await bcrypt.compare(newPassword, row.password_hash)) {
+      throw new BadRequestException('new password must be different from the current one');
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+    const updated = await pool.query(
+      'UPDATE merchants SET password_hash = $2, session_version = session_version + 1, updated_at = NOW() WHERE id = $1 RETURNING session_version',
+      [merchantId, passwordHash],
+    );
+    const newSessionVersion = updated.rows[0].session_version;
+
+    const merchant: MerchantClaims = {
+      id: row.id,
+      email: row.email,
+      name: row.name,
+      stellar_base_address: row.stellar_base_address,
+    };
+    this.logger.log(`password changed for merchant ${merchantId} (session_version bumped to ${newSessionVersion})`);
+    return { token: this.issueToken(merchant, newSessionVersion), merchant };
+  }
+
   // Bumps session_version the same way a password reset does, so the token
   // being logged out (and any copy of it) stops passing AuthGuard. A missing
   // or already-invalid token has nothing to revoke, so it's a no-op.
