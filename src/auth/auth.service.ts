@@ -3,6 +3,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import * as bcrypt from 'bcryptjs';
 import * as jwt from 'jsonwebtoken';
 import { pool } from '../db/pool';
+import { MIN_REFERRAL_QUALIFYING_AMOUNT_USDC } from '../referrals/referral-rewards.service';
 import { assertDistinctSecrets, resolveSessionSecret } from '../common/secrets';
 import { merchantLoginAttempts } from '../common/login-attempts';
 import { MAILER, Mailer } from '../mail/mailer';
@@ -435,12 +436,12 @@ export class AuthService {
 
     const { rows: referrals } = await pool.query(
       `SELECT m.name, m.email, r.created_at,
-              EXISTS(SELECT 1 FROM payments p WHERE p.merchant_id = r.referred_id AND p.status = 'paid') AS activated
+              EXISTS(SELECT 1 FROM payments p WHERE p.merchant_id = r.referred_id AND p.status = 'paid' AND p.amount_usdc >= $2) AS activated
        FROM referrals r
        JOIN merchants m ON m.id = r.referred_id
        WHERE r.referrer_id = $1
        ORDER BY r.created_at DESC`,
-      [merchantId],
+      [merchantId, MIN_REFERRAL_QUALIFYING_AMOUNT_USDC],
     );
 
     return {
