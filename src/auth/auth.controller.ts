@@ -68,6 +68,7 @@ const updateNameSchema = z.object({
 
 const requestEmailChangeSchema = z.object({
   email: emailSchema,
+  current_password: z.string().min(1, 'Current password is required'),
 });
 
 const confirmEmailChangeSchema = z.object({
@@ -472,6 +473,7 @@ export class AuthController {
   @ApiOperation({
     summary: 'Request an email address change',
     description:
+      'Requires the current password as re-authentication. ' +
       'Sends a verification link to the requested new email address. ' +
       'The actual swap does not happen until the link is confirmed via POST /auth/me/confirm-email-change. ' +
       'A second request before confirmation replaces the first pending token. ' +
@@ -480,13 +482,13 @@ export class AuthController {
   })
   @ApiBody(zodBody(requestEmailChangeSchema, 'Request email change'))
   @ApiResponse({ status: 200, description: 'Always returns { ok: true }.' })
-  @ApiResponse({ status: 401, description: 'Not authenticated.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated or current_password incorrect.' })
   async requestEmailChange(
     @Body(new ZodValidationPipe(requestEmailChangeSchema)) body: z.infer<typeof requestEmailChangeSchema>,
     @Req() req: AuthedRequest,
   ) {
     try {
-      await this.auth.requestEmailChange(req.merchant.id, body.email);
+      await this.auth.requestEmailChange(req.merchant.id, body.email, body.current_password);
     } catch (err) {
       // Surface validation errors (same-as-current, bad format) but swallow
       // conflict errors to avoid telling the caller whether that address

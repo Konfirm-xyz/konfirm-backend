@@ -489,8 +489,24 @@ export class AuthService {
   //
   // A new request while a pending one is open replaces it via
   // DELETE+INSERT so only one live token exists per merchant at a time.
-  async requestEmailChange(merchantId: string, newEmail: string): Promise<void> {
+  async requestEmailChange(
+    merchantId: string,
+    newEmail: string,
+    currentPassword: string,
+  ): Promise<void> {
     newEmail = normalizeEmail(newEmail);
+
+    // Re-authenticate: email changes are security-critical and require the current password.
+    const { rows: merchantRows } = await pool.query(
+      'SELECT email, password_hash FROM merchants WHERE id = $1',
+      [merchantId],
+    );
+    if (merchantRows.length === 0) throw new NotFoundException('merchant not found');
+
+    const ok = await bcrypt.compare(currentPassword, merchantRows[0].password_hash);
+    if (!ok) {
+      throw new UnauthorizedException('current password is incorrect');
+    }
 
     // Reject if the new address is already taken by another merchant.
     const { rows: conflict } = await pool.query(
@@ -502,9 +518,7 @@ export class AuthService {
     }
 
     // Reject if the new address is the same as the current one.
-    const { rows: current } = await pool.query('SELECT email FROM merchants WHERE id = $1', [merchantId]);
-    if (current.length === 0) throw new NotFoundException('merchant not found');
-    if (current[0].email === newEmail) {
+    if (merchantRows[0].email === newEmail) {
       throw new BadRequestException('new email must differ from the current email');
     }
 
@@ -569,6 +583,10 @@ export class AuthService {
       );
     }
 
+    // Fetch previous email before updating so we can alert the original address.
+    const { rows: prevRows } = await pool.query('SELECT email FROM merchants WHERE id = $1', [merchantId]);
+    const previousEmail = prevRows[0]?.email;
+
     const { rows } = await pool.query(
       `UPDATE merchants
        SET email = $2, session_version = session_version + 1, updated_at = NOW()
@@ -585,6 +603,26 @@ export class AuthService {
       stellar_base_address: row.stellar_base_address,
     };
     this.logger.log(`email changed for merchant ${merchantId} → ${newEmail}`);
+
+    // Notify the old email address (best-effort) so the owner is alerted if their account was hijacked.
+    if (previousEmail && previousEmail !== newEmail) {
+      await this.mailer
+        .send({
+          to: previousEmail,
+          subject: 'Security Alert: Your Konfirm account email address was changed',
+          text:
+            `Your Konfirm account email address was just changed to ${newEmail}.\n\n` +
+            `If you requested this change, you can safely disregard this message.\n\n` +
+            `If you did NOT authorize this change, someone may have compromised your session. ` +
+            `Please contact Konfirm support immediately to secure your account.`,
+        })
+        .catch((err) => {
+          this.logger.warn(
+            `failed to send email change notification to previous address ${previousEmail}: ${err?.message}`,
+          );
+        });
+    }
+
     return { token: this.issueToken(merchant, row.session_version), merchant };
   }
 
