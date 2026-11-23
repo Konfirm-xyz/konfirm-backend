@@ -185,6 +185,7 @@ This table lists every route in `src/admin/admin.controller.ts`, and every route
 | `DELETE` | `/admin/merchants/:id/team/members/:memberId` 🔐 | — | Force-remove a member (no role guard, logged to `admin_actions`) |
 | `GET` | `/admin/links` 🔐 | — | Payment links across every merchant |
 | `GET` | `/admin/blockchain/status` 🔐 | — | Deployed contract addresses and their live status |
+| `POST` | `/admin/blockchain/channel/allowlist-tokens` 🔐 | — | Calls `set_token_allowed(true)` on the channel contract for every token the backend config expects (USDC, EURC, XLM). Run once after a fresh deploy + initialize, or every real `open_channel` fails with `TokenNotAllowed`. Needs `STELLAR_DEPLOYER_SECRET_KEY` (the contract admin); idempotent, returns a per-token result |
 | `GET` | `/admin/notifications` 🔐 | — | Events derived live from existing rows: x402 settlements, disputed payments, stuck withdrawals, blocks. Nothing is stored separately |
 | `GET` | `/admin/treasury/status` 🔐 | — | Treasury contract state and balances |
 | `GET` | `/admin/fee-revenue/summary` 🔐 | — | Fee revenue totals from confirmed payments |

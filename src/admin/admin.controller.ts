@@ -48,7 +48,7 @@ const setMerchantFeeBpsSchema = z.object({
 });
 
 const setPaymentStatusSchema = z.object({
-  status: z.enum(['paid', 'held', 'disputed']),
+  status: z.enum(['paid', 'held', 'disputed', 'voided']),
   reason: z.string().max(500).optional(),
 });
 
@@ -343,7 +343,7 @@ export class AdminController {
   @Patch('payments/:id/status')
   @ApiOperation({
     summary: 'Set payment status',
-    description: 'Manually override a payment status (paid/held/disputed). Logged to admin_actions.',
+    description: 'Manually override a payment status (paid/held/disputed/voided). Logged to admin_actions.',
   })
   @ApiParam({ name: 'id', description: 'Payment UUID', type: 'string' })
   @ApiBody(zodBody(setPaymentStatusSchema, 'Set payment status'))
@@ -544,6 +544,25 @@ export class AdminController {
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
   getBlockchainStatus() {
     return this.blockchain.status();
+  }
+
+  // backend#191: allowlist every token the backend's own config expects
+  // (USDC, EURC, XLM) on the deployed channel contract, so real
+  // open_channel calls stop failing with TokenNotAllowed after a fresh
+  // deploy + initialize. Idempotent — re-running it is harmless.
+  @Post('blockchain/channel/allowlist-tokens')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Allowlist channel tokens',
+    description:
+      'Calls set_token_allowed(true) on the deployed channel contract for every token in the backend config ' +
+      '(USDC, EURC, XLM). Requires STELLAR_DEPLOYER_SECRET_KEY (the contract admin). Run once after a fresh ' +
+      'deploy + initialize; safe to re-run.',
+  })
+  @ApiResponse({ status: 200, description: 'Per-token result with transaction hash or error reason.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
+  allowlistChannelTokens() {
+    return this.blockchain.allowlistChannelTokens();
   }
 
   // --- Notifications ---

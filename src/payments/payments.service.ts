@@ -204,7 +204,9 @@ export class PaymentsService {
   }
 
   // Every status is returned, not just 'paid', so the dashboard can show a
-  // held payment with its reason. Totals should count only status = 'paid'.
+  // held payment with its reason, or an on-chain-voided one as 'voided'
+  // rather than as a realized payment. Totals should count only
+  // status = 'paid'.
   async listForMerchant(merchantId: string) {
     const { rows } = await pool.query(
       `SELECT p.id, p.muxed_id, p.amount_usdc, p.fee_usdc, p.net_usdc,
