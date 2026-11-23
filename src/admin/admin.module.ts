@@ -3,6 +3,7 @@ import { AdminAuthModule } from '../admin-auth/admin-auth.module';
 import { AuthModule } from '../auth/auth.module';
 import { WithdrawalsModule } from '../withdrawals/withdrawals.module';
 import { FacilitatorModule } from '../facilitator/facilitator.module';
+import { MAILER, mailerFromEnv } from '../mail/mailer';
 import { AdminController } from './admin.controller';
 import { AdminTreasurySettlementsController } from './admin-treasury-settlements.controller';
 import { AdminTreasurySettlementsService } from './admin-treasury-settlements.service';
@@ -53,6 +54,7 @@ import { X402Module } from '../x402/x402.module';
     AdminReferralsService,
     AdminBazaarService,
     AdminTeamService,
+    { provide: MAILER, useFactory: () => mailerFromEnv() },
   ],
 })
 export class AdminModule {}

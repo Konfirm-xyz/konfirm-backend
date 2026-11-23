@@ -1,8 +1,13 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { pool } from '../db/pool';
+import { MAILER, Mailer, paymentConfirmedMail, paymentHeldMail } from '../mail/mailer';
 
 @Injectable()
 export class AdminPaymentsService {
+  private readonly logger = new Logger(AdminPaymentsService.name);
+
+  constructor(@Inject(MAILER) private readonly mailer: Mailer) {}
+
   async list(status?: string, limit = 50, offset = 0) {
     const params: unknown[] = [];
     let where = '';
@@ -61,6 +66,45 @@ export class AdminPaymentsService {
       );
     }
 
+    // Merchant notification for the two statuses a merchant must hear about.
+    // Best-effort, same shape as the referral-earned mail: a mail failure is
+    // logged and swallowed so it can never roll back the committed status.
+    if (status === 'paid' || status === 'held') {
+      await this.notifyMerchant(id, status);
+    }
+
     return { payment, previous: previous as string };
+  }
+
+  private async notifyMerchant(paymentId: string, status: 'paid' | 'held'): Promise<void> {
+    try {
+      const { rows } = await pool.query<{
+        email: string | null;
+        amount_usdc: string;
+        asset_code: string;
+        flag_reason: string | null;
+      }>(
+        `SELECT m.email, p.amount_usdc, p.asset_code, p.flag_reason
+         FROM payments p
+         JOIN merchants m ON m.id = p.merchant_id
+         WHERE p.id = $1`,
+        [paymentId],
+      );
+      const row = rows[0];
+      if (!row?.email) return;
+      const notification = {
+        merchantEmail: row.email,
+        amount: row.amount_usdc,
+        currency: row.asset_code,
+        reference: paymentId,
+      };
+      await this.mailer.send(
+        status === 'paid'
+          ? paymentConfirmedMail(notification)
+          : paymentHeldMail({ ...notification, reason: row.flag_reason ?? undefined }),
+      );
+    } catch (err) {
+      this.logger.error(`failed to send payment-${status} email for payment ${paymentId}: ${err}`);
+    }
   }
 }

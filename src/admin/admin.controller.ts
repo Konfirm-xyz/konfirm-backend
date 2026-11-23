@@ -27,6 +27,7 @@ import { AdminTeamService } from './admin-team.service';
 import { FacilitatorSpendGuardService } from '../facilitator/facilitator-spend-guard.service';
 import { AuthService } from '../auth/auth.service';
 import { zodBody } from '../common/zod-to-openapi';
+import { daysQuerySchema, DaysQuery } from './admin.schemas';
 
 const passwordResetSchema = z.object({
   reason: z.string().min(3).max(500),
@@ -605,8 +606,8 @@ export class AdminController {
   @ApiQuery({ name: 'days', required: false, type: 'number', description: 'Number of days (default 30)' })
   @ApiResponse({ status: 200, description: 'Array of { date, amount } objects.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  getFeeRevenueDaily(@Query('days') days?: string) {
-    return this.feeRevenue.daily(days ? Number(days) : undefined);
+  getFeeRevenueDaily(@Query(new ZodValidationPipe(daysQuerySchema)) query: DaysQuery) {
+    return this.feeRevenue.daily(query.days);
   }
 
   // --- Users ---

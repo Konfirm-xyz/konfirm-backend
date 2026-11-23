@@ -4,7 +4,7 @@ import {
   Injectable,
   PipeTransform,
 } from '@nestjs/common';
-import { ZodError, ZodSchema } from 'zod';
+import { ZodError, ZodType } from 'zod';
 
 /**
  * Validates an incoming value against a Zod schema and returns the parsed
@@ -13,7 +13,7 @@ import { ZodError, ZodSchema } from 'zod';
  */
 @Injectable()
 export class ZodValidationPipe implements PipeTransform {
-  constructor(private readonly schema: ZodSchema) {}
+  constructor(private readonly schema: ZodType) {}
 
   transform(value: unknown, _metadata: ArgumentMetadata): unknown {
     try {

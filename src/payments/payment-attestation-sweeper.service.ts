@@ -1,6 +1,7 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { pool } from '../db/pool';
+import { MAILER, Mailer, paymentConfirmedMail } from '../mail/mailer';
 import { PaymentAttestationService } from './payment-attestation.service';
 
 // Arbitrary but stable pg_advisory_lock key -- namespaced away from
@@ -34,7 +35,10 @@ interface AttestationDueRow {
 export class PaymentAttestationSweeperService {
   private readonly logger = new Logger(PaymentAttestationSweeperService.name);
 
-  constructor(private readonly attestation: PaymentAttestationService) {}
+  constructor(
+    private readonly attestation: PaymentAttestationService,
+    @Inject(MAILER) private readonly mailer: Mailer,
+  ) {}
 
   @Cron('*/2 * * * *')
   async sweep(): Promise<void> {
@@ -150,6 +154,12 @@ export class PaymentAttestationSweeperService {
           `UPDATE payments SET onchain_payment_id = $2, attested_at = NOW() WHERE id = $1 AND attested_at IS NULL`,
           [row.id, result.onchainPaymentId],
         );
+
+        // The payment is now attested on-chain, i.e. confirmed as 'paid'.
+        // Best-effort, same shape as the referral-earned mail: a mail failure
+        // is logged and swallowed so it never retries or unwinds the
+        // already-committed attestation.
+        await this.notifyConfirmed(row.id);
       } catch (err) {
         // One row's failure -- attestation or the write-back after it --
         // must never abort the rest of the batch. Left unattested; the
@@ -157,6 +167,30 @@ export class PaymentAttestationSweeperService {
         // sweeper in this codebase.
         this.logger.error(`attestation errored for payment ${row.id}: ${err}`);
       }
+    }
+  }
+
+  private async notifyConfirmed(paymentId: string): Promise<void> {
+    try {
+      const { rows } = await pool.query<{ email: string | null; amount_usdc: string; asset_code: string }>(
+        `SELECT m.email, p.amount_usdc, p.asset_code
+         FROM payments p
+         JOIN merchants m ON m.id = p.merchant_id
+         WHERE p.id = $1`,
+        [paymentId],
+      );
+      const row = rows[0];
+      if (!row?.email) return;
+      await this.mailer.send(
+        paymentConfirmedMail({
+          merchantEmail: row.email,
+          amount: row.amount_usdc,
+          currency: row.asset_code,
+          reference: paymentId,
+        }),
+      );
+    } catch (err) {
+      this.logger.error(`failed to send payment-confirmed email for payment ${paymentId}: ${err}`);
     }
   }
 }
