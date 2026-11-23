@@ -57,7 +57,7 @@ export class ChannelController {
       'Rate-limited to 60 req/min. Unauthenticated.',
   })
   @ApiBody(zodBody(claimSchema, 'Channel claim request'))
-  @ApiResponse({ status: 200 | 201, description: 'Returns { accepted: true }.' })
+  @ApiResponse({ status: 201, description: 'Returns { accepted: true }.' })
   @ApiResponse({ status: 400, description: 'Claim rejected (invalid signature, stale nonce, unknown channel, etc.).' })
   async claim(@Body(new ZodValidationPipe(claimSchema)) body: z.infer<typeof claimSchema>) {
     const result = await this.channel.claim({
@@ -83,7 +83,7 @@ export class ChannelController {
       'Rate-limited to 20 req/min (Soroban submission). Unauthenticated.',
   })
   @ApiBody(zodBody(openSchema, 'Open channel request'))
-  @ApiResponse({ status: 200 | 201, description: 'Returns { success: true, channel_id, transaction }.' })
+  @ApiResponse({ status: 201, description: 'Returns { success: true, channel_id, transaction }.' })
   @ApiResponse({ status: 400, description: 'Channel open failed.' })
   async open(@Body(new ZodValidationPipe(openSchema)) body: z.infer<typeof openSchema>) {
     const result = await this.channel.openChannel({ transactionXdr: body.transaction, resourceUrl: body.resource_url });
@@ -103,7 +103,7 @@ export class ChannelController {
       'Rate-limited to 20 req/min. Unauthenticated.',
   })
   @ApiBody(zodBody(closeSchema, 'Close channel request'))
-  @ApiResponse({ status: 200 | 201, description: 'Returns { success: true, transaction }.' })
+  @ApiResponse({ status: 201, description: 'Returns { success: true, transaction }.' })
   @ApiResponse({ status: 400, description: 'Channel close failed.' })
   async close(@Body(new ZodValidationPipe(closeSchema)) body: z.infer<typeof closeSchema>) {
     const result = await this.channel.closeChannel({ transactionXdr: body.transaction });

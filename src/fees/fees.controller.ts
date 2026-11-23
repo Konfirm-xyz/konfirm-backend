@@ -67,7 +67,7 @@ export class FeesController {
       'Provide `amount` + `asset_code` for a partial settlement.',
   })
   @ApiBody(zodBody(createSettlementSchema ?? z.object({}), 'Create settlement request (optional partial selection)'))
-  @ApiResponse({ status: 200 | 201, description: 'Settlement record with unsigned XDR.' })
+  @ApiResponse({ status: 201, description: 'Settlement record with unsigned XDR.' })
   @ApiResponse({ status: 400, description: 'Validation error or no owed fees.' })
   @ApiResponse({ status: 401, description: 'Not authenticated.' })
   create(
@@ -92,7 +92,7 @@ export class FeesController {
   })
   @ApiParam({ name: 'id', description: 'Settlement UUID', type: 'string' })
   @ApiBody(zodBody(submitSchema, 'Signed settlement XDR'))
-  @ApiResponse({ status: 200 | 201, description: 'Submission result.' })
+  @ApiResponse({ status: 201, description: 'Submission result.' })
   @ApiResponse({ status: 400, description: 'Invalid settlement ID or XDR mismatch.' })
   @ApiResponse({ status: 401, description: 'Not authenticated.' })
   @ApiResponse({ status: 404, description: 'Settlement not found or not owned by this merchant.' })
@@ -114,7 +114,7 @@ export class FeesController {
       'Can only be done before the merchant has signed — once submitted on-chain it cannot be disputed.',
   })
   @ApiParam({ name: 'id', description: 'Settlement UUID', type: 'string' })
-  @ApiResponse({ status: 200 | 201, description: 'Settlement marked as disputed.' })
+  @ApiResponse({ status: 201, description: 'Settlement marked as disputed.' })
   @ApiResponse({ status: 400, description: 'Invalid settlement ID or settlement already submitted.' })
   @ApiResponse({ status: 401, description: 'Not authenticated.' })
   @ApiResponse({ status: 404, description: 'Settlement not found or not owned by this merchant.' })

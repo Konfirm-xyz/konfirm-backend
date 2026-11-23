@@ -4,7 +4,7 @@ import { Throttle } from '@nestjs/throttler';
 import { AuthedRequest, AuthGuard } from '../auth/auth.guard';
 import { listQuerySchema, ListQuery } from '../admin/admin.schemas';
 import { ZodValidationPipe } from '../zod-validation.pipe';
-import { nonNegativeIntegerStringSchema, POSTGRES_BIGINT_MAX } from '../common/numeric-validation';
+import { isUuid, nonNegativeIntegerStringSchema, POSTGRES_BIGINT_MAX } from '../common/numeric-validation';
 import { PaymentsService } from './payments.service';
 
 // Same shape check as deposits.controller.ts's account fields.
@@ -32,7 +32,7 @@ export class PaymentsController {
   @ApiQuery({ name: 'muxed_id', required: true, description: 'Stringified u64 muxed ID reserved by the payer', type: 'string' })
   @ApiQuery({ name: 'payer', required: true, description: 'Payer Stellar G... address', type: 'string' })
   @ApiResponse({ status: 200, description: 'Unsigned XDR transaction and fee details.' })
-  @ApiResponse({ status: 400, description: 'Missing required query parameters or payer is blocked.' })
+  @ApiResponse({ status: 400, description: 'Missing/malformed query parameters or payer is blocked.' })
   @ApiResponse({ status: 404, description: 'Link not found.' })
   prepareTx(
     @Query('linkId') linkId: string,
@@ -42,6 +42,7 @@ export class PaymentsController {
     if (!linkId || !muxedId || !payer) {
       throw new BadRequestException('linkId, muxed_id, and payer are all required');
     }
+    this.validateLinkId(linkId);
     // Checked here, before the service hands it to Horizon: a malformed
     // address otherwise gets retried by withRetry and surfaces as a 500.
     if (!STELLAR_ADDRESS.test(payer)) {
@@ -64,15 +65,24 @@ export class PaymentsController {
   @ApiQuery({ name: 'linkId', required: true, description: 'Payment link UUID', type: 'string' })
   @ApiQuery({ name: 'muxed_id', required: true, description: 'Stringified u64 muxed ID reserved by the payer', type: 'string' })
   @ApiResponse({ status: 200, description: 'SEP-7 URI string.' })
-  @ApiResponse({ status: 400, description: 'Missing required query parameters.' })
+  @ApiResponse({ status: 400, description: 'Missing/malformed linkId or muxed_id.' })
   @ApiResponse({ status: 404, description: 'Link not found.' })
   @ApiResponse({ status: 409, description: 'Link carries a non-zero platform fee; use prepare-tx.' })
   buildPayUri(@Query('linkId') linkId: string, @Query('muxed_id') muxedId: string) {
     if (!linkId || !muxedId) {
       throw new BadRequestException('linkId and muxed_id are both required');
     }
+    this.validateLinkId(linkId);
     this.validateMuxedId(muxedId);
     return this.payments.buildPayUri(linkId, muxedId);
+  }
+
+  // links.id is a UUID column: a malformed linkId would otherwise reach
+  // Postgres and fail the uuid cast (#373).
+  private validateLinkId(linkId: string): void {
+    if (!isUuid(linkId)) {
+      throw new BadRequestException('linkId must be a valid UUID');
+    }
   }
 
   private validateMuxedId(muxedId: string): void {
