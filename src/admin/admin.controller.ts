@@ -67,6 +67,10 @@ const setBazaarListingStatusSchema = z.object({
   reason: z.string().max(500).optional(),
 });
 
+const setFacilitatorCapSchema = z.object({
+  capUsdc: z.number().finite().nonnegative(),
+});
+
 // Admin-assisted profile override (issue #38). All fields optional so the
 // caller only sends what needs changing.
 const updateMerchantProfileSchema = z
@@ -743,6 +747,27 @@ export class AdminController {
     const cleared = await this.facilitatorSpendGuard.resume();
     await this.actions.log(req.admin.id, 'facilitator.resume', 'facilitator', 'spend-guard', cleared);
     return { ok: true };
+  }
+
+  @Patch('facilitator/cap')
+  @ApiOperation({
+    summary: 'Set the facilitator daily spend cap',
+    description:
+      'Persists a DB-backed daily cap override (USDC) so the cap can be tuned without an env-var change and redeploy. Logged to admin_actions.',
+  })
+  @ApiBody(zodBody(setFacilitatorCapSchema, 'Set facilitator daily cap'))
+  @ApiResponse({ status: 200, description: 'Returns { ok: true, capUsdc }.' })
+  @ApiResponse({ status: 400, description: 'capUsdc missing, non-numeric or negative.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
+  async setFacilitatorCap(
+    @Body(new ZodValidationPipe(setFacilitatorCapSchema)) body: z.infer<typeof setFacilitatorCapSchema>,
+    @Req() req: AuthedAdminRequest,
+  ) {
+    await this.facilitatorSpendGuard.setDailyCap(body.capUsdc);
+    await this.actions.log(req.admin.id, 'facilitator.set_cap', 'facilitator', 'spend-guard', {
+      capUsdc: body.capUsdc,
+    });
+    return { ok: true, capUsdc: body.capUsdc };
   }
 
   // Surfaced back to the admin UI as a recent-activity feed rather than

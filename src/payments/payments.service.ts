@@ -8,8 +8,6 @@ import { getEffectiveFeeBps } from '../common/effective-fee';
 import { platformFeeAddress } from '../common/platform-fee';
 import { feeStroops, fromStroops, platformFeeFloor, toStroops } from '../common/money-rules';
 import { HORIZON_URL, NETWORK_PASSPHRASE } from '../common/stellar-network';
-import { assertLinkPayable } from '../common/payable-link';
-import { isUuid } from '../common/numeric-validation';
 
 
 @Injectable()
@@ -32,9 +30,6 @@ export class PaymentsService {
   // code's SEP-7 payment-request flow) so a link's active/expiry/amount
   // rules can't drift between them.
   private async loadPayableLink(linkId: string) {
-    // Non-UUID ids would blow up the uuid cast in Postgres (500) rather than
-    // reading as "no such link".
-    if (!isUuid(linkId)) throw new NotFoundException('link not found');
     const linkRes = await pool.query(
       `SELECT l.id, l.amount_usdc, l.currency, l.active, l.expires_at,
               l.reusable, l.max_uses,
@@ -47,8 +42,10 @@ export class PaymentsService {
     );
     if (linkRes.rows.length === 0) throw new NotFoundException('link not found');
     const link = linkRes.rows[0];
-    // active / expiry / suspended-merchant — shared with SessionsService.reserve().
-    assertLinkPayable(link);
+    if (!link.active) throw new BadRequestException('link is not active');
+    if (link.expires_at && new Date(link.expires_at) < new Date()) {
+      throw new BadRequestException('link has expired');
+    }
     // A single-use link (reusable = false) accepts exactly one confirmed
     // payment. The reconciler deactivates it after that payment lands, but
     // we guard here too so concurrent checkout attempts against an already-
@@ -67,6 +64,14 @@ export class PaymentsService {
     }
     if (!link.stellar_base_address) {
       throw new BadRequestException('merchant has no Stellar address configured');
+    }
+    // A suspended merchant's links stop accepting payment immediately — the
+    // real teeth of a suspension, not just locking them out of their own
+    // dashboard (see auth.guard.ts). Not restricted to merchant_status =
+    // 'active': a 'pending' (not yet email-verified) merchant can still log
+    // in and accept payments — only 'suspended' blocks checkout.
+    if (link.merchant_status === 'suspended') {
+      throw new BadRequestException('this merchant is not currently accepting payments');
     }
     return link;
   }
@@ -208,9 +213,7 @@ export class PaymentsService {
   }
 
   // Every status is returned, not just 'paid', so the dashboard can show a
-  // held payment with its reason, or an on-chain-voided one as 'voided'
-  // rather than as a realized payment. Totals should count only
-  // status = 'paid'.
+  // held payment with its reason. Totals should count only status = 'paid'.
   async listForMerchant(merchantId: string) {
     const { rows } = await pool.query(
       `SELECT p.id, p.muxed_id, p.amount_usdc, p.fee_usdc, p.net_usdc,
@@ -249,4 +252,3 @@ export class PaymentsService {
     return { pending: rows.length > 0, since: rows[0]?.created_at ?? null };
   }
 }
-

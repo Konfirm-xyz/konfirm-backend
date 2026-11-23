@@ -221,6 +221,8 @@ export class FacilitatorSpendGuardService implements OnModuleInit {
       // check is about to set.
       await client.query('SELECT pg_advisory_xact_lock($1)', [SPEND_GUARD_LOCK_KEY]);
 
+      // Clears the halt flag only -- the day's spend log is deliberately left
+      // intact, so resuming after a breach does not hand back a fresh cap.
       // RETURNING captures exactly what this DELETE cleared, so the caller can
       // put it in the audit log -- otherwise the halt reason is gone for good.
       const cleared = await client.query<{ key: string; value: string }>(

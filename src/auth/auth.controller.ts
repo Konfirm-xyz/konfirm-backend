@@ -1,5 +1,5 @@
-import { BadRequestException, Body, ConflictException, Controller, Delete, Get, HttpCode, Logger, Param, Patch, Post, Req, Res, UseGuards } from '@nestjs/common';
-import { ApiBody, ApiCookieAuth, ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { BadRequestException, Body, ConflictException, Controller, Delete, Get, HttpCode, Logger, Param, Patch, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
+import { ApiBody, ApiCookieAuth, ApiOperation, ApiParam, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
 import { z } from 'zod';
@@ -75,6 +75,11 @@ const confirmEmailChangeSchema = z.object({
   token: z.string().min(20).max(200),
 });
 
+// Signup email verification token — same shape as the email-change token.
+const confirmEmailSchema = z.object({
+  token: z.string().min(20).max(200),
+});
+
 // Full Stellar G-address validation matches the pattern used at signup.
 const updateStellarAddressSchema = z.object({
   stellar_base_address: z
@@ -121,6 +126,47 @@ export class AuthController {
     );
     this.setSessionCookie(res, token);
     return { merchant };
+  }
+
+  // Signup email verification: the link in the signup email points here. The
+  // service flips the merchant from 'pending' to 'active' and is idempotent
+  // for an already-active account, so a double-click is harmless.
+  @Post('confirm-email')
+  @HttpCode(200)
+  @Throttle(AUTH_THROTTLE)
+  @ApiOperation({
+    summary: 'Confirm a signup email address',
+    description:
+      'Consumes the one-time token sent at signup and flips the merchant from ' +
+      'pending to active. Rate-limited to 10 req/min per IP.',
+  })
+  @ApiBody(zodBody(confirmEmailSchema, 'Confirm signup email'))
+  @ApiResponse({ status: 200, description: 'Email confirmed; returns { status: "active" }.' })
+  @ApiResponse({ status: 400, description: 'Token invalid, expired, or already used.' })
+  @ApiResponse({ status: 422, description: 'Validation error.' })
+  async confirmEmail(@Body(new ZodValidationPipe(confirmEmailSchema)) body: z.infer<typeof confirmEmailSchema>) {
+    return this.auth.confirmEmail(body.token);
+  }
+
+  // GET variant so the link in the email can be clicked directly. Same
+  // throttle as the POST: the token is single-use, but guessing is still
+  // rate-limited.
+  @Get('confirm-email')
+  @Throttle(AUTH_THROTTLE)
+  @ApiOperation({
+    summary: 'Confirm a signup email address (link target)',
+    description:
+      'Same as POST /auth/confirm-email, for direct clicks on the emailed link. ' +
+      'Rate-limited to 10 req/min per IP.',
+  })
+  @ApiQuery({ name: 'token', required: true, description: 'Verification token from the signup email', type: 'string' })
+  @ApiResponse({ status: 200, description: 'Email confirmed; returns { status: "active" }.' })
+  @ApiResponse({ status: 400, description: 'Token invalid, expired, or already used.' })
+  @ApiResponse({ status: 422, description: 'Validation error.' })
+  async confirmEmailViaLink(@Query('token') token: string) {
+    const parsed = confirmEmailSchema.safeParse({ token });
+    if (!parsed.success) throw new BadRequestException('invalid verification token');
+    return this.auth.confirmEmail(parsed.data.token);
   }
 
   @Post('login')
