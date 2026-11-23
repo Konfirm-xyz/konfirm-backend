@@ -30,6 +30,7 @@ declare module '@x402/stellar/exact/facilitator' {
     readonly areFeesSponsored: boolean;
     readonly rpcConfig?: RpcConfig;
     readonly maxTransactionFeeStroops: number;
+    readonly inclusionFeeStroops: number;
     readonly feeBumpSigner?: FacilitatorStellarSigner;
 
     constructor(
@@ -38,6 +39,9 @@ declare module '@x402/stellar/exact/facilitator' {
         rpcConfig?: RpcConfig;
         areFeesSponsored?: boolean;
         maxTransactionFeeStroops?: number;
+        // Inclusion fee bid (stroops) on top of the resource fee, default 100.
+        // Mainnet often needs more for Soroban txs to be included.
+        inclusionFeeStroops?: number;
         selectSigner?: (addresses: readonly string[]) => string;
         feeBumpSigner?: FacilitatorStellarSigner;
       },

@@ -5,6 +5,8 @@ import {
   BASE_FEE,
   Contract,
   Keypair,
+  Operation,
+  StrKey,
   TransactionBuilder,
   nativeToScVal,
 } from '@stellar/stellar-sdk';
@@ -191,6 +193,115 @@ describe('ChannelService.openChannel() validation (no network)', () => {
       transactionXdr: buildOpenChannelXdr({ payer: facilitatorAddress, delegatedCloser: null }),
     });
     expect(result).toEqual({ success: false, errorReason: 'facilitator_is_payer' });
+  });
+});
+
+// closeChannel()'s validation branches — all return before any RPC call
+// (simulateTransaction/sendTransaction), so no network is needed.
+describe('ChannelService.closeChannel() validation (no network)', () => {
+  const channel = new ChannelService();
+  const facilitatorAddress = Keypair.fromSecret(process.env.FACILITATOR_SECRET_KEY as string).publicKey();
+  const channelIds: string[] = [];
+
+  async function seedChannel(payer: string, payee: string, status = 'open'): Promise<bigint> {
+    const onchainChannelId = 9_000_000_000_000n + BigInt(Math.floor(Math.random() * 1_000_000_000));
+    await pool.query(
+      `INSERT INTO x402_channels (onchain_channel_id, payer_address, payee_address, asset_contract, payer_pubkey, deposited, status)
+       VALUES ($1, $2, $3, 'CASSET', $4, '1000000', $5)`,
+      [onchainChannelId.toString(), payer, payee, Buffer.alloc(32, 7).toString('hex'), status],
+    );
+    channelIds.push(onchainChannelId.toString());
+    return onchainChannelId;
+  }
+
+  function buildCloseXdr(args: {
+    caller?: string;
+    channelId?: bigint;
+    contractId?: string;
+    functionName?: string;
+    argCount?: number;
+    source?: string;
+    extraOp?: boolean;
+  }): string {
+    const account = new Account(args.source ?? Keypair.random().publicKey(), '0');
+    const fullArgs = [
+      new Address(args.caller ?? Keypair.random().publicKey()).toScVal(),
+      nativeToScVal(args.channelId ?? 1n, { type: 'u64' }),
+    ];
+    const invokeArgs = args.argCount !== undefined ? fullArgs.slice(0, args.argCount) : fullArgs;
+    const contract = new Contract(args.contractId ?? CHANNEL_CONTRACT_ID);
+    const builder = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK_PASSPHRASE })
+      .setTimeout(60)
+      .addOperation(contract.call(args.functionName ?? 'initiate_close', ...invokeArgs));
+    if (args.extraOp) builder.addOperation(contract.call('initiate_close', ...invokeArgs));
+    return builder.build().toXDR();
+  }
+
+  afterAll(async () => {
+    if (channelIds.length > 0) {
+      await pool.query('DELETE FROM x402_channels WHERE onchain_channel_id = ANY($1::bigint[])', [channelIds]);
+    }
+  });
+
+  it('rejects malformed XDR', async () => {
+    await expect(channel.closeChannel({ transactionXdr: 'not-xdr' })).resolves.toEqual({
+      success: false,
+      errorReason: 'malformed_transaction',
+    });
+  });
+
+  it('rejects more than one operation', async () => {
+    const result = await channel.closeChannel({ transactionXdr: buildCloseXdr({ extraOp: true }) });
+    expect(result).toEqual({ success: false, errorReason: 'wrong_operation_count' });
+  });
+
+  it('rejects a non-invokeHostFunction operation', async () => {
+    const account = new Account(Keypair.random().publicKey(), '0');
+    const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK_PASSPHRASE })
+      .setTimeout(60)
+      .addOperation(Operation.bumpSequence({ bumpTo: '1' }))
+      .build();
+    const result = await channel.closeChannel({ transactionXdr: tx.toXDR() });
+    expect(result).toEqual({ success: false, errorReason: 'wrong_operation_type' });
+  });
+
+  it('rejects the facilitator as transaction source', async () => {
+    const result = await channel.closeChannel({ transactionXdr: buildCloseXdr({ source: facilitatorAddress }) });
+    expect(result).toEqual({ success: false, errorReason: 'unsafe_tx_source' });
+  });
+
+  it('rejects a different contract', async () => {
+    const otherContract = StrKey.encodeContract(Buffer.alloc(32, 1));
+    const result = await channel.closeChannel({ transactionXdr: buildCloseXdr({ contractId: otherContract }) });
+    expect(result).toEqual({ success: false, errorReason: 'wrong_contract' });
+  });
+
+  it('rejects a function other than initiate_close', async () => {
+    const result = await channel.closeChannel({ transactionXdr: buildCloseXdr({ functionName: 'close' }) });
+    expect(result).toEqual({ success: false, errorReason: 'wrong_function' });
+  });
+
+  it('rejects initiate_close with the wrong arg count', async () => {
+    const result = await channel.closeChannel({ transactionXdr: buildCloseXdr({ argCount: 1 }) });
+    expect(result).toEqual({ success: false, errorReason: 'wrong_function' });
+  });
+
+  it('rejects an unknown channel', async () => {
+    const result = await channel.closeChannel({ transactionXdr: buildCloseXdr({ channelId: 8_999_999_999_999n }) });
+    expect(result).toEqual({ success: false, errorReason: 'channel_not_found' });
+  });
+
+  it('rejects a caller who is neither payer nor payee', async () => {
+    const channelId = await seedChannel(Keypair.random().publicKey(), Keypair.random().publicKey());
+    const result = await channel.closeChannel({ transactionXdr: buildCloseXdr({ channelId }) });
+    expect(result).toEqual({ success: false, errorReason: 'caller_not_a_party' });
+  });
+
+  it('rejects a channel that is not open', async () => {
+    const payer = Keypair.random().publicKey();
+    const channelId = await seedChannel(payer, Keypair.random().publicKey(), 'closing');
+    const result = await channel.closeChannel({ transactionXdr: buildCloseXdr({ caller: payer, channelId }) });
+    expect(result).toEqual({ success: false, errorReason: 'channel_not_open' });
   });
 });
 
