@@ -1,4 +1,4 @@
-import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
+import { CanActivate, ExecutionContext, Injectable, SetMetadata, UnauthorizedException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import type { Request } from 'express';
 import { pool } from '../db/pool';
@@ -17,6 +17,10 @@ const COOKIE_NAME = 'konfirm_admin_session';
 // whose role is not in the allowed set. Routes without the decorator stay
 // open to every authenticated admin, preserving existing behaviour.
 export const ADMIN_ROLES_KEY = 'admin_roles';
+
+// The decorator the guard reads. Without it the key above is never set and
+// every authenticated admin — `support` included — passes every route.
+export const AdminRoles = (...roles: AdminRole[]) => SetMetadata(ADMIN_ROLES_KEY, roles);
 
 @Injectable()
 export class AdminGuard implements CanActivate {

@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { APP_FILTER, APP_GUARD } from '@nestjs/core';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ReconcilerWatchdogService } from './observability/reconciler-watchdog.service';
+import { ComplianceCanaryService } from './observability/compliance-canary.service';
 import { FeesModule } from './fees/fees.module';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { LoggerModule } from 'nestjs-pino';
@@ -80,6 +81,7 @@ const isProd = process.env.NODE_ENV === 'production';
   ],
   providers: [
     ReconcilerWatchdogService,
+    ComplianceCanaryService,
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
   ],

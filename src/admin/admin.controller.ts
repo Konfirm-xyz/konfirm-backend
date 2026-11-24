@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { ZodValidationPipe } from '../zod-validation.pipe';
 import { parsePaginationInt } from '../common/numeric-validation';
 import { listQuerySchema } from './admin.schemas';
-import { AdminGuard, AuthedAdminRequest } from '../admin-auth/admin-auth.guard';
+import { AdminGuard, AdminRoles, AuthedAdminRequest } from '../admin-auth/admin-auth.guard';
 import { AdminMerchantsService } from './admin-merchants.service';
 import { AdminActionsService } from './admin-actions.service';
 import { AdminStatsService } from './admin-stats.service';
@@ -344,8 +344,11 @@ export class AdminController {
   @ApiQuery({ name: 'offset', required: false, type: 'number', description: 'Pagination offset' })
   @ApiResponse({ status: 200, description: 'Array of payment records.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  listPayments(@Query('status') status?: string, @Query('limit') limit?: string, @Query('offset') offset?: string) {
-    return this.payments.list(status, parsePaginationInt(limit), parsePaginationInt(offset));
+  listPayments(
+    @Query('status') status?: string,
+    @Query(new ZodValidationPipe(listQuerySchema)) query: ListQuery = {},
+  ) {
+    return this.payments.list(status, query.limit, query.offset);
   }
 
   @Patch('payments/:id/status')
@@ -421,6 +424,7 @@ export class AdminController {
   // --- Compliance ---
 
   @Get('compliance/blocked-addresses')
+  @AdminRoles('superadmin')
   @ApiOperation({ summary: 'List blocked Stellar addresses', description: 'The admin-managed compliance blocklist.' })
   @ApiResponse({ status: 200, description: 'Array of blocked address records.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
@@ -429,6 +433,7 @@ export class AdminController {
   }
 
   @Post('compliance/blocked-addresses')
+  @AdminRoles('superadmin')
   @ApiOperation({
     summary: 'Block a Stellar address',
     description: 'Adds a Stellar address to the blocklist. Logged to admin_actions.',
@@ -448,6 +453,7 @@ export class AdminController {
   }
 
   @Delete('compliance/blocked-addresses/:id')
+  @AdminRoles('superadmin')
   @ApiOperation({
     summary: 'Unblock a Stellar address',
     description: 'Removes a Stellar address from the blocklist. Logged to admin_actions.',
@@ -527,8 +533,11 @@ export class AdminController {
   @ApiQuery({ name: 'offset', required: false, type: 'number' })
   @ApiResponse({ status: 200, description: 'Array of x402 settlement records.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  listX402Settlements(@Query('status') status?: string, @Query('limit') limit?: string, @Query('offset') offset?: string) {
-    return this.x402Settlements.list(status, limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
+  listX402Settlements(
+    @Query('status') status?: string,
+    @Query(new ZodValidationPipe(listQuerySchema)) query: ListQuery = {},
+  ) {
+    return this.x402Settlements.list(status, query.limit, query.offset);
   }
 
   // --- Pay links ---
@@ -598,6 +607,7 @@ export class AdminController {
   // --- Treasury ---
 
   @Get('treasury/status')
+  @AdminRoles('superadmin')
   @ApiOperation({ summary: 'Get treasury contract state', description: 'Treasury contract state and balances.' })
   @ApiResponse({ status: 200, description: 'Treasury status object.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
@@ -637,8 +647,8 @@ export class AdminController {
   @ApiQuery({ name: 'offset', required: false, type: 'number' })
   @ApiResponse({ status: 200, description: 'Array of payer address summaries.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  listUsers(@Query('limit') limit?: string, @Query('offset') offset?: string) {
-    return this.users.list(limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
+  listUsers(@Query(new ZodValidationPipe(listQuerySchema)) query: ListQuery = {}) {
+    return this.users.list(query.limit, query.offset);
   }
 
   // --- Wallets ---
@@ -654,8 +664,8 @@ export class AdminController {
   @ApiQuery({ name: 'offset', required: false, type: 'number' })
   @ApiResponse({ status: 200, description: 'Array of wallet role objects.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  listWallets(@Query('limit') limit?: string, @Query('offset') offset?: string) {
-    return this.wallets.list(limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
+  listWallets(@Query(new ZodValidationPipe(listQuerySchema)) query: ListQuery = {}) {
+    return this.wallets.list(query.limit, query.offset);
   }
 
   // --- Exchange rate ---
@@ -673,8 +683,8 @@ export class AdminController {
   @ApiQuery({ name: 'limit', required: false, type: 'number' })
   @ApiResponse({ status: 200, description: 'Array of conversion records.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  listExchangeRateConversions(@Query('limit') limit?: string) {
-    return this.exchangeRate.recentConversions(limit ? Number(limit) : undefined);
+  listExchangeRateConversions(@Query(new ZodValidationPipe(listQuerySchema)) query: ListQuery = {}) {
+    return this.exchangeRate.recentConversions(query.limit);
   }
 
   // --- Referrals ---
@@ -685,8 +695,8 @@ export class AdminController {
   @ApiQuery({ name: 'offset', required: false, type: 'number' })
   @ApiResponse({ status: 200, description: 'Array of referral records.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  listReferrals(@Query('limit') limit?: string, @Query('offset') offset?: string) {
-    return this.referrals.list(limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
+  listReferrals(@Query(new ZodValidationPipe(listQuerySchema)) query: ListQuery = {}) {
+    return this.referrals.list(query.limit, query.offset);
   }
 
   // --- Bazaar listings ---
@@ -729,6 +739,7 @@ export class AdminController {
   // (a compromised but still-legitimate signing process, not a leaked key).
 
   @Get('facilitator/status')
+  @AdminRoles('superadmin')
   @ApiOperation({
     summary: 'Facilitator spend-guard status',
     description: 'Returns today\'s facilitator spend against the cap, and whether signing is currently halted.',
@@ -740,6 +751,7 @@ export class AdminController {
   }
 
   @Post('facilitator/resume')
+  @AdminRoles('superadmin')
   @ApiOperation({
     summary: 'Resume facilitator signing after a halt',
     description:
