@@ -33,8 +33,8 @@ export function checksumOf(sql: string): string {
   return createHash('sha256').update(sql, 'utf8').digest('hex');
 }
 
-async function ensureTrackingTable(): Promise<void> {
-  await pool.query(`
+async function ensureTrackingTableOn(db: Pool): Promise<void> {
+  await db.query(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       name TEXT PRIMARY KEY,
       applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -42,25 +42,25 @@ async function ensureTrackingTable(): Promise<void> {
   `);
   // Existing installs predate the checksum column; add it in place. Rows
   // applied before this change have NULL and are backfilled on the next `up`.
-  await pool.query('ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS checksum TEXT');
+  await db.query('ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS checksum TEXT');
 }
 
 // Fails loudly, before applying anything, when an already-applied migration
 // file no longer matches the checksum recorded when it ran. NULL checksums
 // (rows from before checksums existed) are backfilled rather than rejected.
-async function verifyAppliedChecksums(): Promise<void> {
-  const { rows } = await pool.query('SELECT name, checksum FROM schema_migrations');
+async function verifyAppliedChecksums(db: Pool, migrationsDir: string): Promise<void> {
+  const { rows } = await db.query('SELECT name, checksum FROM schema_migrations');
   const mismatches: string[] = [];
 
   for (const { name, checksum } of rows as { name: string; checksum: string | null }[]) {
-    const file = join(MIGRATIONS_DIR, `${name}.up.sql`);
+    const file = join(migrationsDir, `${name}.up.sql`);
     if (!existsSync(file)) {
       mismatches.push(`${name}: applied but ${name}.up.sql is missing`);
       continue;
     }
     const actual = checksumOf(readFileSync(file, 'utf8'));
     if (checksum === null) {
-      await pool.query('UPDATE schema_migrations SET checksum = $2 WHERE name = $1', [name, actual]);
+      await db.query('UPDATE schema_migrations SET checksum = $2 WHERE name = $1', [name, actual]);
     } else if (checksum !== actual) {
       mismatches.push(`${name}: recorded ${checksum}, file is now ${actual}`);
     }
@@ -109,8 +109,8 @@ export function findMissingDownMigrations(dir: string = MIGRATIONS_DIR): string[
     .sort();
 }
 
-function assertDownMigrationsExist(): void {
-  const missing = findMissingDownMigrations();
+function assertDownMigrationsExist(dir: string = MIGRATIONS_DIR): void {
+  const missing = findMissingDownMigrations(dir);
   if (missing.length > 0) {
     throw new Error(
       `missing down-migration(s) for: ${missing.join(', ')} — every .up.sql needs a matching .down.sql`,
@@ -118,10 +118,20 @@ function assertDownMigrationsExist(): void {
   }
 }
 
-function pendingUpFiles(applied: Set<string>): string[] {
-  const files = readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith('.up.sql'));
+/** @deprecated Use ensureTrackingTableOn(db) */
+async function ensureTrackingTable(): Promise<void> {
+  await ensureTrackingTableOn(pool);
+}
+
+function pendingUpFilesFrom(migrationsDir: string, applied: Set<string>): string[] {
+  const files = readdirSync(migrationsDir).filter((f) => f.endsWith('.up.sql'));
   assertUniquePrefixes(files);
   return files.sort().filter((f) => !applied.has(f.replace(/\.up\.sql$/, '')));
+}
+
+/** @deprecated Use pendingUpFilesFrom(dir, applied) */
+function pendingUpFiles(applied: Set<string>): string[] {
+  return pendingUpFilesFrom(MIGRATIONS_DIR, applied);
 }
 
 // The migration's own SQL and its tracking-table record land in the same
@@ -172,17 +182,17 @@ export function validateMigrationPairs(dir: string = MIGRATIONS_DIR): { missingD
   return { missingDown };
 }
 
-async function up(): Promise<void> {
-  const { missingDown } = validateMigrationPairs();
+export async function up(db: Pool = pool, migrationsDir: string = MIGRATIONS_DIR): Promise<void> {
+  const { missingDown } = validateMigrationPairs(migrationsDir);
   if (missingDown.length > 0) {
     throw new Error(`missing .down.sql migration(s): ${missingDown.join(', ')} — every migration must have a reversible down path`);
   }
 
-  await ensureTrackingTable();
-  await verifyAppliedChecksums();
-  const { rows } = await pool.query('SELECT name FROM schema_migrations');
+  await ensureTrackingTableOn(db);
+  await verifyAppliedChecksums(db, migrationsDir);
+  const { rows } = await db.query('SELECT name FROM schema_migrations');
   const applied = new Set(rows.map((r) => r.name as string));
-  const pending = pendingUpFiles(applied);
+  const pending = pendingUpFilesFrom(migrationsDir, applied);
 
   if (pending.length === 0) {
     console.log('up to date — nothing to apply.');
@@ -192,16 +202,16 @@ async function up(): Promise<void> {
   for (const file of pending) {
     const name = file.replace(/\.up\.sql$/, '');
     console.log(`applying ${name}...`);
-    const sql = readFileSync(join(MIGRATIONS_DIR, file), 'utf8');
-    await applyMigrationSql(pool, sql, 'INSERT INTO schema_migrations (name, checksum) VALUES ($1, $2)', [name, checksumOf(sql)]);
+    const sql = readFileSync(join(migrationsDir, file), 'utf8');
+    await applyMigrationSql(db, sql, 'INSERT INTO schema_migrations (name, checksum) VALUES ($1, $2)', [name, checksumOf(sql)]);
   }
   console.log(`applied ${pending.length} migration(s).`);
 }
 
-async function down(steps: number): Promise<void> {
-  assertDownMigrationsExist();
-  await ensureTrackingTable();
-  const { rows } = await pool.query('SELECT name FROM schema_migrations ORDER BY applied_at DESC LIMIT $1', [steps]);
+export async function down(steps: number, db: Pool = pool, migrationsDir: string = MIGRATIONS_DIR): Promise<void> {
+  assertDownMigrationsExist(migrationsDir);
+  await ensureTrackingTableOn(db);
+  const { rows } = await db.query('SELECT name FROM schema_migrations ORDER BY applied_at DESC LIMIT $1', [steps]);
 
   if (rows.length === 0) {
     console.log('nothing to revert.');
@@ -209,13 +219,13 @@ async function down(steps: number): Promise<void> {
   }
 
   for (const { name } of rows) {
-    const downFile = join(MIGRATIONS_DIR, `${name}.down.sql`);
+    const downFile = join(migrationsDir, `${name}.down.sql`);
     if (!existsSync(downFile)) {
       throw new Error(`no down-migration found for ${name} (expected ${downFile}) — refusing to leave the tracking table out of sync`);
     }
     console.log(`reverting ${name}...`);
     const sql = readFileSync(downFile, 'utf8');
-    await applyMigrationSql(pool, sql, 'DELETE FROM schema_migrations WHERE name = $1', [name]);
+    await applyMigrationSql(db, sql, 'DELETE FROM schema_migrations WHERE name = $1', [name]);
   }
   console.log(`reverted ${rows.length} migration(s).`);
 }
@@ -223,9 +233,9 @@ async function down(steps: number): Promise<void> {
 async function main(): Promise<void> {
   const [, , cmd, arg] = process.argv;
   if (cmd === 'up') {
-    await up();
+    await up(pool, MIGRATIONS_DIR);
   } else if (cmd === 'down') {
-    await down(arg ? Number(arg) : 1);
+    await down(arg ? Number(arg) : 1, pool, MIGRATIONS_DIR);
   } else if (cmd === 'check') {
     // No database needed: CI runs this before `up` so a duplicate prefix
     // fails the build with a clear message instead of a confusing apply order.
