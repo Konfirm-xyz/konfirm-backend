@@ -15,7 +15,9 @@ const createLinkSchema = z.object({
   // A link with amount_usdc = "0" is unpayable: the Stellar SDK rejects
   // Operation.payment({ amount: "0" }), so payers would hit a generic 500.
   // Reject zero (and any non-positive value) at creation time with a 400.
-  amount_usdc: nonNegativeDecimalStringSchema('amount_usdc', 7, 999_999_999_999_999_999n)
+  // Bounded to Stellar's max int64 stroop amount: anything larger parses fine
+  // but throws inside Operation.payment() at payment time, surfacing as a 500.
+  amount_usdc: nonNegativeDecimalStringSchema('amount_usdc', 7, 9_223_372_036_854_775_807n)
     .refine((value) => Number(value) > 0, {
       message: 'amount_usdc must be greater than 0',
     })
