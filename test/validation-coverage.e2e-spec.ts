@@ -203,7 +203,7 @@ describe('validation coverage: signup address, admin enums, pagination, rate lim
     });
 
     it('rejects an invalid status value for setPaymentStatus', async () => {
-      expect(paymentId).toBeDefined();
+      expect(paymentId).toBeDefined(); // Setup must succeed; fix beforeEach if this fails
 
       const res = await request(app.getHttpServer())
         .patch(`/admin/payments/${paymentId}/status`)
@@ -215,7 +215,7 @@ describe('validation coverage: signup address, admin enums, pagination, rate lim
     });
 
     it('accepts valid status values: paid, held, disputed', async () => {
-      expect(paymentId).toBeDefined();
+      expect(paymentId).toBeDefined(); // Setup must succeed; fix beforeEach if this fails
 
       const statuses = ['paid', 'held', 'disputed'];
       for (const status of statuses) {
@@ -339,7 +339,7 @@ describe('validation coverage: signup address, admin enums, pagination, rate lim
 
   describe('payment status response includes payer-facing status', () => {
     it('includes status information in payment responses', async () => {
-      expect(paymentId).toBeDefined();
+      expect(paymentId).toBeDefined(); // Setup must succeed; fix beforeEach if this fails
 
       const res = await request(app.getHttpServer())
         .patch(`/admin/payments/${paymentId}/status`)
