@@ -18,7 +18,7 @@ Scope: process topology, service coupling, test architecture, and configuration.
 
 **Fix:** `jest.config.js` now defines two projects, `fast` and `live`. `npm run test:fast` is what blocks CI; `npm run test:live` still runs on every push but is `continue-on-error: true`, so a testnet or Friendbot hiccup is visible without failing the build. `npm test` (no args) still runs both, for local use.
 
-Verified: `fast` — 22 suites, 127 tests, ~12s. `live` — 3 suites, 48 tests, ~34s, run clean after chasing down an unrelated one-off failure (below).
+Verified at time of writing: `fast` — 22 suites, 127 tests, ~12s. `live` — 3 suites, 48 tests, ~34s, run clean after chasing down an unrelated one-off failure (below). Suite counts have grown since this audit; run `npx jest --selectProjects fast --listTests` for the current count.
 
 ### 2. Duplicated anchor integration, and a config gap that followed from it
 
@@ -41,6 +41,6 @@ Verified: typecheck clean, 8 new unit tests on `AnchorClient` (mocked `fetch`, s
 ## Verification
 
 - Backend typecheck: clean.
-- `npm run test:fast`: 22 suites, 127 tests.
-- `npm run test:live`: 3 suites, 48 tests (clean run).
+- `npm run test:fast`: 42 suites (as of this update; was 22 at original audit time).
+- `npm run test:live`: 6 suites (as of this update; was 3 at original audit time).
 - `npm audit --omit=dev`: 0 findings.
