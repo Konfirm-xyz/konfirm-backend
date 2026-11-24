@@ -1,5 +1,5 @@
 /// <reference path="../common/stellar-sdk-contract.d.ts" />
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { Client } from '@stellar/stellar-sdk/contract';
 import type { AssembledTransaction, MethodOptions } from '@stellar/stellar-sdk/contract';
 import { Networks } from '@stellar/stellar-sdk';
@@ -33,6 +33,8 @@ function getUsdcClient(): Promise<Client & SacTokenContract> {
 
 @Injectable()
 export class AdminTreasuryService {
+  private readonly logger = new Logger(AdminTreasuryService.name);
+
   async status() {
     let usdcBalance: string | null = null;
     let reachable = true;
@@ -48,8 +50,7 @@ export class AdminTreasuryService {
     } catch (err) {
       reachable = false;
       clientPromise = null;
-      // eslint-disable-next-line no-console
-      console.warn('[admin] could not read treasury USDC balance', err);
+      this.logger.warn(`could not read treasury USDC balance: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     return {

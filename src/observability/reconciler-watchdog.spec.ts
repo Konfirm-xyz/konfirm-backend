@@ -41,16 +41,19 @@ describe('ReconcilerWatchdogService', () => {
   });
 
   it('flags a cursor that has not moved, while merchants are active', async () => {
+    // Own fixture: an active, Stellar-linked merchant, so the stalled path is
+    // always exercised instead of depending on whatever the DB holds.
+    const { rows } = await pool.query(
+      `INSERT INTO merchants (name, email, password_hash, status, stellar_base_address)
+       VALUES ('Watchdog Fixture', $1, 'test', 'active', $2) RETURNING id`,
+      [fixtureEmail, 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN7'],
+    );
+    fixtureMerchantId = rows[0].id;
     await pool.query("UPDATE reconciler_state SET updated_at = NOW() - INTERVAL '30 minutes'");
     const r = await svc.check();
-    const active = (await pool.query("SELECT COUNT(*)::int AS n FROM merchants WHERE status = 'active' AND stellar_base_address IS NOT NULL")).rows[0].n;
-    if (active > 0) {
-      expect(r.stalled).toBe(true);
-      expect(errors.length).toBe(1);
-      expect(errors[0]).toMatch(/stalled/);
-    } else {
-      expect(r.stalled).toBe(false);
-    }
+    expect(r.stalled).toBe(true);
+    expect(errors.length).toBe(1);
+    expect(errors[0]).toMatch(/stalled/);
   });
 
   it('logs a failed query through its own logger instead of throwing', async () => {

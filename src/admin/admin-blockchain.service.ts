@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { Horizon, rpc } from '@stellar/stellar-sdk';
 import { withRetry } from '../common/retry';
 import { HORIZON_URL, RPC_URL } from '../common/stellar-network';
@@ -24,6 +24,7 @@ const CONTRACTS = [
 
 @Injectable()
 export class AdminBlockchainService {
+  private readonly logger = new Logger(AdminBlockchainService.name);
   private horizon = new Horizon.Server(HORIZON_URL);
   private rpcServer = new rpc.Server(RPC_URL);
 
@@ -33,6 +34,18 @@ export class AdminBlockchainService {
       this.pingRpc(),
       checkComplianceCanary(),
     ]);
+
+    const reasons: Array<[string, PromiseSettledResult<unknown>]> = [
+      ['facilitator account read', facilitatorResult],
+      ['RPC ping', rpcResult],
+      ['compliance canary', complianceCanary],
+    ];
+    for (const [label, r] of reasons) {
+      if (r.status === 'rejected') {
+        const msg = r.reason instanceof Error ? r.reason.message : String(r.reason);
+        this.logger.warn(`blockchain status: ${label} failed: ${msg}`);
+      }
+    }
 
     return {
       network: 'testnet',
