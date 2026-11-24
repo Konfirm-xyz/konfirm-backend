@@ -23,6 +23,11 @@ repository:
   has_wiki: false
   # #120: delete merged feature branches automatically.
   delete_branch_on_merge: true
+  # #283: require every action in .github/workflows to be pinned to a
+  # full-length commit SHA, so a mutable tag can't be re-introduced.
+  # Equivalent API call: gh api -X PUT repos/Konfirm-xyz/konfirm-backend/actions/permissions
+  #   -f sha_pinning_required=true
+  sha_pinning_required: true
 
 # #268: branch protection on main. `enforce_admins` must stay true so admins
 # cannot push or merge past the required review and the `test` check. There is

@@ -99,6 +99,31 @@ To re-verify at any time, run the two commands above and compare against the `us
 
 ---
 
+## Issue #283: Require SHA Pinning for Actions
+
+GitHub can reject any workflow that references an action by tag or branch instead of a full-length commit SHA. This makes the pinning in #118 enforced rather than a convention.
+
+**Steps to enable:**
+
+1. Navigate to Settings → Actions → General
+2. Under "Workflow permissions", enable **Require actions to be pinned to a full-length commit SHA**
+3. Or apply it with the API:
+
+   ```sh
+   gh api -X PUT repos/Konfirm-xyz/konfirm-backend/actions/permissions \
+     -f sha_pinning_required=true
+   ```
+
+The same value is declared in `.github/settings.yml` (`repository.sha_pinning_required: true`) so the Settings app keeps it applied.
+
+**Verification:**
+
+- `gh api repos/Konfirm-xyz/konfirm-backend/actions/permissions` → `"sha_pinning_required": true`
+- Open a PR that changes a workflow step to `uses: actions/checkout@v4` → the workflow is rejected before merge
+- Every `uses:` in `.github/workflows/` points at a 40-character commit SHA
+
+---
+
 ## References
 
 - [GitHub Branch Protection Documentation](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/managing-a-branch-protection-rule)
