@@ -194,7 +194,8 @@ export class AdminTreasurySettlementsController {
     description:
       'Verifies the signed XDR hashes to exactly what Konfirm built for this build_token, then submits it and ' +
       'polls for confirmation. Re-syncs the settlement mirror row from chain afterward -- never from anything ' +
-      'the client claims.',
+      'the client claims. If that re-sync fails after the transaction confirmed, the response still reports ' +
+      'success with mirror_sync_pending: true instead of a 500.',
   })
   @ApiBody(zodBody(submitSchema, 'Signed XDR and the build_token returned by propose/approve/execute'))
   @ApiResponse({ status: 200, description: 'The freshly-synced settlement record, plus tx_hash.' })
@@ -206,10 +207,15 @@ export class AdminTreasurySettlementsController {
     @Req() req: AuthedAdminRequest,
   ) {
     const result = await this.settlements.submitSigned(body.signed_xdr, body.build_token);
+    // A confirmed transaction whose mirror re-read failed still counts as a
+    // successful submit -- log it as such, flagging that the mirror needs a
+    // retry, rather than letting the admin see a failed action.
+    const mirrorSyncPending = 'mirror_sync_pending' in result;
     await this.actions.log(req.admin.id, 'treasury_settlement.submit', 'treasury_settlement', result.onchain_settlement_id, {
-      status: result.status,
-      approvals_count: result.approvals_count,
+      status: mirrorSyncPending ? 'submitted' : result.status,
+      approvals_count: mirrorSyncPending ? null : result.approvals_count,
       tx_hash: result.tx_hash,
+      mirror_sync_pending: mirrorSyncPending,
     });
     return result;
   }

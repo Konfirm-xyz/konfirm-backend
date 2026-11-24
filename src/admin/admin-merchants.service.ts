@@ -109,14 +109,24 @@ export class AdminMerchantsService {
 
     sets.push('updated_at = NOW()');
 
-    const { rows } = await pool.query(
-      `UPDATE merchants SET ${sets.join(', ')}
-       WHERE id = $1
-       RETURNING id, email, name, stellar_base_address, status, risk_tier`,
-      params,
-    );
-    if (rows.length === 0) throw new NotFoundException('merchant not found');
-    return rows[0];
+    // The pre-check above is only a fast path: a concurrent update can claim
+    // the same email between it and the UPDATE, so the unique index is the
+    // real guard. Catch its 23505 and map it to the same 409.
+    try {
+      const { rows } = await pool.query(
+        `UPDATE merchants SET ${sets.join(', ')}
+         WHERE id = $1
+         RETURNING id, email, name, stellar_base_address, status, risk_tier`,
+        params,
+      );
+      if (rows.length === 0) throw new NotFoundException('merchant not found');
+      return rows[0];
+    } catch (err) {
+      if ((err as { code?: string }).code === '23505') {
+        throw new ConflictException('an account with this email already exists');
+      }
+      throw err;
+    }
   }
 
   // fee_bps is the base rate charged at checkout (see effective-fee.ts) and
