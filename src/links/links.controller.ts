@@ -1,5 +1,5 @@
-import { Body, Controller, Get, HttpCode, Param, Post, Req, UseGuards } from '@nestjs/common';
-import { ApiBody, ApiCookieAuth, ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { Body, Controller, Get, HttpCode, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { ApiBody, ApiCookieAuth, ApiOperation, ApiParam, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { z } from 'zod';
 import { ZodValidationPipe } from '../zod-validation.pipe';
 import { AuthedRequest, AuthGuard } from '../auth/auth.guard';
@@ -76,12 +76,22 @@ export class LinksController {
   @ApiCookieAuth('merchant-session')
   @ApiOperation({
     summary: "List the authenticated merchant's payment links",
-    description: 'Returns links newest-first with a live use_count (confirmed payments only).',
+    description: 'Returns links newest-first with a live use_count (confirmed payments only). Use limit and offset to paginate past 50.',
   })
+  @ApiQuery({ name: 'limit', required: false, description: 'Max results per page (1–500, default 50)', type: 'number' })
+  @ApiQuery({ name: 'offset', required: false, description: 'Number of results to skip (default 0)', type: 'number' })
   @ApiResponse({ status: 200, description: 'Array of link records.' })
   @ApiResponse({ status: 401, description: 'Not authenticated.' })
-  listMine(@Req() req: AuthedRequest) {
-    return this.links.listForMerchant(req.merchant.id);
+  listMine(
+    @Req() req: AuthedRequest,
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+  ) {
+    return this.links.listForMerchant(
+      req.merchant.id,
+      limit !== undefined ? parseInt(limit, 10) : undefined,
+      offset !== undefined ? parseInt(offset, 10) : undefined,
+    );
   }
 
   @Get(':id/public')
