@@ -29,6 +29,7 @@ import { FacilitatorSpendGuardService } from '../facilitator/facilitator-spend-g
 import { AuthService } from '../auth/auth.service';
 import { zodBody } from '../common/zod-to-openapi';
 import { daysQuerySchema, DaysQuery } from './admin.schemas';
+import { ActivityQuery, activityQuerySchema } from './admin.schemas';
 
 const passwordResetSchema = z.object({
   reason: z.string().min(3).max(500),
@@ -790,26 +791,18 @@ export class AdminController {
   @ApiQuery({ name: 'from', required: false, type: 'string', description: 'ISO start date/time filter' })
   @ApiQuery({ name: 'to', required: false, type: 'string', description: 'ISO end date/time filter' })
   @ApiResponse({ status: 200, description: 'Array of admin action records.' })
+  @ApiResponse({ status: 400, description: 'Invalid query parameters.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  recentActivity(
-    @Query('limit') limit?: string,
-    @Query('offset') offset?: string,
-    @Query('admin_id') admin_id?: string,
-    @Query('action') action?: string,
-    @Query('target_type') target_type?: string,
-    @Query('target_id') target_id?: string,
-    @Query('from') from?: string,
-    @Query('to') to?: string,
-  ) {
+  recentActivity(@Query(new ZodValidationPipe(activityQuerySchema)) query: ActivityQuery) {
     return this.actions.recent({
-      limit: limit ? Number(limit) : undefined,
-      offset: offset ? Number(offset) : undefined,
-      admin_id,
-      action,
-      target_type,
-      target_id,
-      from,
-      to,
+      limit: query.limit,
+      offset: query.offset,
+      admin_id: query.admin_id,
+      action: query.action,
+      target_type: query.target_type,
+      target_id: query.target_id,
+      from: query.from,
+      to: query.to,
     });
   }
 }

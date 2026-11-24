@@ -99,6 +99,25 @@ export function assertUniquePrefixes(files: string[]): void {
   throw new Error(`duplicate migration prefixes — renumber so each prefix is unique:\n${detail}`);
 }
 
+// Every .up.sql must have a matching .down.sql, otherwise `down` can only
+// fail halfway through a revert. Checked before applying anything so a
+// missing pair is caught at startup rather than at rollback time.
+export function findMissingDownMigrations(dir: string = MIGRATIONS_DIR): string[] {
+  return readdirSync(dir)
+    .filter((f) => f.endsWith('.up.sql'))
+    .filter((f) => !existsSync(join(dir, f.replace(/\.up\.sql$/, '.down.sql'))))
+    .sort();
+}
+
+function assertDownMigrationsExist(): void {
+  const missing = findMissingDownMigrations();
+  if (missing.length > 0) {
+    throw new Error(
+      `missing down-migration(s) for: ${missing.join(', ')} — every .up.sql needs a matching .down.sql`,
+    );
+  }
+}
+
 function pendingUpFiles(applied: Set<string>): string[] {
   const files = readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith('.up.sql'));
   assertUniquePrefixes(files);
@@ -180,6 +199,7 @@ async function up(): Promise<void> {
 }
 
 async function down(steps: number): Promise<void> {
+  assertDownMigrationsExist();
   await ensureTrackingTable();
   const { rows } = await pool.query('SELECT name FROM schema_migrations ORDER BY applied_at DESC LIMIT $1', [steps]);
 
