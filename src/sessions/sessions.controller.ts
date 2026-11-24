@@ -12,6 +12,14 @@ const reserveSchema = z.object({
   muxed_id: muxedIdSchema,
 });
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function requireUuidLinkId(linkId: string): void {
+  if (!UUID_RE.test(linkId)) {
+    throw new BadRequestException('linkId must be a valid UUID');
+  }
+}
+
 @ApiTags('Sessions')
 @Controller('links/:linkId/sessions')
 export class SessionsController {
@@ -40,6 +48,7 @@ export class SessionsController {
     @Param('linkId') linkId: string,
     @Body(new ZodValidationPipe(reserveSchema)) body: z.infer<typeof reserveSchema>,
   ) {
+    requireUuidLinkId(linkId);
     return this.sessions.reserve(linkId, body.muxed_id);
   }
 
@@ -63,6 +72,7 @@ export class SessionsController {
   @ApiResponse({ status: 400, description: 'muxedId is not a stringified u64.' })
   @ApiResponse({ status: 404, description: 'Link or session not found.' })
   status(@Param('linkId') linkId: string, @Param('muxedId') muxedId: string) {
+    requireUuidLinkId(linkId);
     if (!muxedIdSchema.safeParse(muxedId).success) {
       throw new BadRequestException('muxedId must fit in a non-negative signed 64-bit integer');
     }
