@@ -2,6 +2,7 @@ import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from
 import type { Request } from 'express';
 import { pool } from '../db/pool';
 import { AuthService, MerchantClaims } from './auth.service';
+import { ApiKeysService } from './api-keys.service';
 
 export interface AuthedRequest extends Request {
   merchant: MerchantClaims;
@@ -71,3 +72,50 @@ export class AuthGuard implements CanActivate {
 }
 
 export const SESSION_COOKIE = COOKIE_NAME;
+
+// Accepts either the session cookie (browser) or `Authorization: Bearer
+// <merchant API key>` (programmatic access, issue #247). The cookie is tried
+// first so existing browser clients are unaffected.
+@Injectable()
+export class ApiKeyGuard implements CanActivate {
+  constructor(
+    private readonly auth: AuthService,
+    private readonly apiKeys: ApiKeysService,
+  ) {}
+
+  async canActivate(context: ExecutionContext): Promise<boolean> {
+    const req = context.switchToHttp().getRequest<AuthedRequest>();
+    const header = req.headers?.authorization;
+    const bearer = typeof header === 'string' && /^Bearer\s+/i.test(header)
+      ? header.replace(/^Bearer\s+/i, '').trim()
+      : undefined;
+
+    if (!bearer) {
+      // No bearer key — fall back to the normal session-cookie path.
+      return new AuthGuard(this.auth).canActivate(context);
+    }
+
+    const resolved = await this.apiKeys.resolve(bearer);
+    if (!resolved) throw new UnauthorizedException('invalid or revoked API key');
+
+    // Same suspension check as a cookie session: a suspended merchant's keys
+    // must stop working immediately.
+    const { rows } = await pool.query(
+      'SELECT email, name, stellar_base_address, status FROM merchants WHERE id = $1',
+      [resolved.merchantId],
+    );
+    if (!rows[0]) throw new UnauthorizedException('invalid or revoked API key');
+    if (rows[0].status === 'suspended') {
+      throw new UnauthorizedException('this account has been suspended — contact support');
+    }
+
+    req.merchant = {
+      id: resolved.merchantId,
+      email: rows[0].email,
+      name: rows[0].name,
+      stellar_base_address: rows[0].stellar_base_address,
+      role: 'owner',
+    };
+    return true;
+  }
+}

@@ -28,9 +28,10 @@ import { AdminReferralsService } from './admin-referrals.service';
 import { AdminBazaarService } from './admin-bazaar.service';
 import { AdminTeamService } from './admin-team.service';
 import { X402Module } from '../x402/x402.module';
+import { WebhooksModule } from '../webhooks/webhooks.module';
 
 @Module({
-  imports: [AdminAuthModule, AuthModule, WithdrawalsModule, FacilitatorModule, X402Module],
+  imports: [AdminAuthModule, AuthModule, WithdrawalsModule, FacilitatorModule, X402Module, WebhooksModule],
   controllers: [AdminController, AdminTreasurySettlementsController],
   providers: [
     AdminTreasurySettlementsService,
