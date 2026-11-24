@@ -1,5 +1,5 @@
 /// <reference path="../common/stellar-sdk-contract.d.ts" />
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { Client } from '@stellar/stellar-sdk/contract';
 import type { AssembledTransaction, MethodOptions } from '@stellar/stellar-sdk/contract';
 import { Asset, Horizon, Networks, StrKey } from '@stellar/stellar-sdk';
@@ -34,6 +34,7 @@ function getUsdcClient(): Promise<Client & SacTokenContract> {
 
 @Injectable()
 export class AdminTreasuryService {
+  private readonly logger = new Logger(AdminTreasuryService.name);
   private readonly horizon = new Horizon.Server(HORIZON_URL);
 
   // The treasury contract's own account id, derived from its contract id
@@ -79,8 +80,7 @@ export class AdminTreasuryService {
     } catch (err) {
       reachable = false;
       clientPromise = null;
-      // eslint-disable-next-line no-console
-      console.warn('[admin] could not read treasury USDC balance', err);
+      this.logger.warn(`could not read treasury USDC balance: ${(err as Error)?.message ?? err}`);
     }
 
     return {

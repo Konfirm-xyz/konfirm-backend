@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { pool } from '../db/pool';
 import { WithdrawalsService } from '../withdrawals/withdrawals.service';
 import { TERMINAL_WITHDRAWAL_STATUSES } from '../common/withdrawal-statuses';
@@ -11,6 +11,8 @@ const RECENT_POLL_WINDOW_MS = 10_000;
 
 @Injectable()
 export class AdminWithdrawalAttemptsService {
+  private readonly logger = new Logger(AdminWithdrawalAttemptsService.name);
+
   constructor(private readonly withdrawals: WithdrawalsService) {}
 
   async list(limit = 50, offset = 0) {
@@ -54,8 +56,7 @@ export class AdminWithdrawalAttemptsService {
     } catch (err) {
       // A stale/expired anchor token or a transient anchor error must never
       // break the whole list — this row just keeps its last known status.
-      // eslint-disable-next-line no-console
-      console.warn('[admin] could not refresh withdrawal attempt status', row.id, err);
+      this.logger.warn(`could not refresh withdrawal attempt ${row.id} status: ${(err as Error)?.message ?? err}`);
       return row;
     }
   }
