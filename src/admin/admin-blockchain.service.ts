@@ -1,9 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Horizon, rpc } from '@stellar/stellar-sdk';
 import { withRetry } from '../common/retry';
-import { HORIZON_URL, RPC_URL } from '../common/stellar-network';
+import { HORIZON_URL, NETWORK_PASSPHRASE, RPC_URL } from '../common/stellar-network';
 import { FACILITATOR_ADDRESS, COMPLIANCE_CONTRACT_ID, PAYMENT_CONTRACT_ID, TREASURY_CONTRACT_ID, CHANNEL_CONTRACT_ID } from '../common/stellar-network';
 import { checkComplianceCanary } from '../common/onchain-compliance';
+import { resolveAsset } from '../common/asset';
+import { ChannelService } from '../x402/channel.service';
 
 
 // Same facilitator identity used everywhere else (facilitator-signer.ts,
@@ -28,6 +30,35 @@ export class AdminBlockchainService {
   private horizon = new Horizon.Server(HORIZON_URL);
   private rpcServer = new rpc.Server(RPC_URL);
 
+  constructor(private readonly channel: ChannelService) {}
+
+  // backend#191: the channel contract only accepts open_channel for tokens
+  // allowlisted via set_token_allowed, and nothing in this backend ever
+  // called it. This is the documented, admin-driven way to do it after a
+  // fresh deploy + initialize. The token list is exactly what the backend's
+  // own config (stellar-network.ts, via resolveAsset) expects to accept —
+  // USDC, EURC, XLM — so it can't drift from what open_channel will be
+  // asked to use. Each token is submitted separately: one failure doesn't
+  // hide the others' results.
+  async allowlistChannelTokens(): Promise<{
+    channelContractId: string;
+    results: Array<{ currency: string; tokenAddress: string; success: boolean; transaction?: string; errorReason?: string }>;
+  }> {
+    const results: Array<{
+      currency: string;
+      tokenAddress: string;
+      success: boolean;
+      transaction?: string;
+      errorReason?: string;
+    }> = [];
+    for (const currency of ['USDC', 'EURC', 'XLM']) {
+      const tokenAddress = resolveAsset(currency).contractId(NETWORK_PASSPHRASE);
+      const result = await this.channel.setTokenAllowed(tokenAddress, true);
+      results.push({ currency, tokenAddress, ...result });
+    }
+    return { channelContractId: CHANNEL_CONTRACT_ID, results };
+  }
+
   async status() {
     const [facilitatorResult, rpcResult, complianceCanary] = await Promise.allSettled([
       withRetry(() => this.horizon.loadAccount(FACILITATOR_ADDRESS), { retries: 1, timeoutMs: 8_000 }),
@@ -44,6 +75,11 @@ export class AdminBlockchainService {
       if (r.status === 'rejected') {
         const msg = r.reason instanceof Error ? r.reason.message : String(r.reason);
         this.logger.warn(`blockchain status: ${label} failed: ${msg}`);
+    // backend#328: surface chain-read failures in logs, not only as flipped booleans.
+    const reads = { 'facilitator account': facilitatorResult, 'RPC ping': rpcResult, 'compliance canary': complianceCanary };
+    for (const [label, result] of Object.entries(reads)) {
+      if (result.status === 'rejected') {
+        this.logger.warn(`${label} read failed: ${(result.reason as Error)?.message ?? result.reason}`);
       }
     }
 

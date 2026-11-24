@@ -159,5 +159,15 @@ describe('LinksService (integration, real Postgres)', () => {
     it('404s for an unknown link id', async () => {
       await expect(links.getPublic(randomUUID())).rejects.toBeInstanceOf(NotFoundException);
     });
+
+    it('404s for a malformed (non-UUID) link id instead of letting Postgres throw', async () => {
+      await expect(links.getPublic('not-a-uuid')).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
+  describe('deactivate', () => {
+    it('404s for a malformed (non-UUID) link id', async () => {
+      await expect(links.deactivate('not-a-uuid', randomUUID())).rejects.toBeInstanceOf(NotFoundException);
+    });
   });
 });

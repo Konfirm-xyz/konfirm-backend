@@ -30,6 +30,16 @@ Cashing out to a bank account is a real SEP-10 (auth) + SEP-24 (interactive with
 - The [`stellar` CLI](https://developers.stellar.org/docs/tools/cli/install-cli), on `PATH`, with a `deployer` identity configured (`stellar keys add deployer --secret-key ...`) — needed by the reconciler's on-chain compliance check (`compliance.rs`, still CLI-shelled) and, locally only, as a convenience fallback if `STELLAR_DEPLOYER_SECRET_KEY` is unset (`x402.service.ts` resolves the facilitator's signing key via `stellar keys secret deployer` in that case). The API's own compliance checks (`payments.service.ts`, `x402.service.ts`) call the compliance contract directly over Soroban RPC — no CLI involved — see [Compliance](#compliance) below.
 - [Freighter](https://www.freighter.app/) browser extension, set to Testnet, for exercising checkout yourself
 
+## Repository settings
+
+`.github/settings.yml` declares `has_wiki: false` (#119) and
+`delete_branch_on_merge: true` (#120), but it is only applied when the
+[Settings App](https://github.com/apps/settings) is installed on this repo.
+It is **not** currently applied — the live repo still has the wiki enabled and
+does not delete merged branches. An org admin must install the app or run the
+`gh api -X PATCH` command documented at the top of that file, then verify with
+`gh api repos/Konfirm-xyz/konfirm-backend --jq '{has_wiki, delete_branch_on_merge}'`.
+
 ## Setup
 
 ```bash
@@ -134,7 +144,7 @@ Admin visibility: `GET /admin/merchants/:id/team` (members + pending invites), `
 |---|---|---|---|
 | `GET` | `/payments/prepare-tx` | `linkId, muxed_id, payer` | Builds an unsigned Freighter transaction; runs compliance screening first; bundles a `ChangeTrust` op automatically if the payer has no USDC trustline yet |
 | `GET` | `/payments/pay-uri` | `linkId, muxed_id` | Returns a `web+stellar:pay` SEP-7 URI for QR/mobile-wallet checkout — no payer address needed or knowable at this point |
-| `GET` | `/payments/mine` 🔒 | — | The logged-in merchant's payments, newest first, with `status` and `flag_reason` (held payments are listed, but only `paid` counts toward totals) |
+| `GET` | `/payments/mine` 🔒 | `limit`, `offset` | The logged-in merchant's payments, newest first, with `status` and `flag_reason` (held payments are listed, but only `paid` counts toward totals). Paginated: `limit` defaults to 25 (max 1000), `offset` defaults to 0 |
 | `GET` | `/payments/mine/pending` 🔒 | — | Whether a session was reserved but hasn't landed yet (drives the "waiting" UI state) |
 | `GET` | `/links/:linkId/sessions/:muxedId` | — | The payer's own session only: `{ confirmed, payment }`, where `payment` carries amount, asset, and tx hash. The checkout page polls this. The random `muxedId` is the capability, so nothing about other payments is exposed |
 
@@ -185,6 +195,7 @@ This table lists every route in `src/admin/admin.controller.ts`, and every route
 | `DELETE` | `/admin/merchants/:id/team/members/:memberId` 🔐 | — | Force-remove a member (no role guard, logged to `admin_actions`) |
 | `GET` | `/admin/links` 🔐 | — | Payment links across every merchant |
 | `GET` | `/admin/blockchain/status` 🔐 | — | Deployed contract addresses and their live status |
+| `POST` | `/admin/blockchain/channel/allowlist-tokens` 🔐 | — | Calls `set_token_allowed(true)` on the channel contract for every token the backend config expects (USDC, EURC, XLM). Run once after a fresh deploy + initialize, or every real `open_channel` fails with `TokenNotAllowed`. Needs `STELLAR_DEPLOYER_SECRET_KEY` (the contract admin); idempotent, returns a per-token result |
 | `GET` | `/admin/notifications` 🔐 | — | Events derived live from existing rows: x402 settlements, disputed payments, stuck withdrawals, blocks. Nothing is stored separately |
 | `GET` | `/admin/treasury/status` 🔐 | — | Treasury contract state and balances |
 | `GET` | `/admin/fee-revenue/summary` 🔐 | — | Fee revenue totals from confirmed payments |
@@ -235,15 +246,25 @@ Every mutation an admin makes is written to `admin_actions` (who, what, on what,
 
 ```
 src/
-  auth/         signup, login, JWT session guard
-  links/        payment link creation + public projection
-  sessions/     muxed-ID reservation against a link
-  payments/     prepare-tx (Freighter), pay-uri (SEP-7), compliance check, by-merchant queries
-  withdrawals/  SEP-10/SEP-24 fiat off-ramp
-  admin-auth/   separate admin identity — guard, JWT service, login/logout/me controller
   admin/        admin resource endpoints — merchants, payments, compliance, reconciler, withdrawal-attempts — + audit logger
+  admin-auth/   separate admin identity — guard, JWT service, login/logout/me controller
+  auth/         signup, login, JWT session guard
+  bazaar/       x402 Bazaar listings — submission, review, public manifest
   common/       shared asset resolution (XLM/USDC)
   db/           Postgres pool
+  deposits/     testnet faucet guard and deposit status
+  facilitator/  x402 facilitator sweep — spend-guard, signing halt/resume
+  fees/         fee collection, settlement building and dispute flow
+  health/       health-check endpoint
+  links/        payment link creation + public projection
+  mail/         transactional email relay (password reset, invite, email change)
+  observability/ global exception filter, structured logging helpers
+  payments/     prepare-tx (Freighter), pay-uri (SEP-7), compliance check, by-merchant queries
+  referrals/    referral code generation, reward sweep, admin reporting
+  services/     shared singleton services (e.g. admin stats)
+  sessions/     muxed-ID reservation against a link
+  withdrawals/  SEP-10/SEP-24 fiat off-ramp
+  x402/         x402 single-shot payment channels and settlement
 reconciler/     Rust binary — watches Horizon, writes confirmed payments
 db/migrations/  ordered .up.sql/.down.sql pairs, applied by db/migrate.ts
 db/migrate.ts   the migration runner itself — no framework, tracks applied migrations in Postgres
@@ -315,13 +336,23 @@ real Stellar testnet and Friendbot availability.
 npm run migrate:up            # applies every pending .up.sql, in order
 npm run migrate:down          # reverts the most recently applied migration
 npm run migrate:down -- 3     # reverts the last 3
+npm run migrate:check         # fails if two migrations share a numeric prefix
 ```
+
+Prefixes must be unique: `migrate:up` (and the `migrate:check` CI step) refuses to run when two files
+share one, because the tie would be broken by file name rather than by when the migration actually
+landed.
 
 Each migration is a `NNN_name.up.sql` / `NNN_name.down.sql` pair — `db/migrate.ts` tracks what's been
 applied in a `schema_migrations` table, so `up` only ever runs what's actually pending (safe to run
 repeatedly) and `down` can genuinely undo something, not just re-run `CREATE TABLE IF NOT EXISTS` and
 hope. The migration's SQL and its tracking-table record land in the same transaction, so a failure
 can't leave the two out of sync.
+
+`schema_migrations` also stores a SHA-256 `checksum` of each applied `.up.sql` file. `migrate:up`
+verifies every recorded checksum before applying anything and fails loudly if an already-applied
+migration file has been edited — fix the file back or add a new migration instead. Rows applied before
+checksums existed have a `NULL` checksum and are backfilled on the next `up`.
 
 What's actually verified, and what isn't: the original round-trip check (apply from empty, revert one
 at a time to nothing, reapply) was done by hand when only migrations `001`–`005` existed. Since then,
@@ -538,7 +569,7 @@ private networking:
 |---|---|---|---|
 | `api` | `/Dockerfile` | Yes | The NestJS app — `railway.json` at repo root |
 | `reconciler` | `reconciler/Dockerfile` | No | Watches Horizon, writes confirmed payments — `reconciler/railway.json`, restart-always |
-| backup cron | repo root, custom start command | No | Runs `db/scripts/backup.sh` on a schedule against the private `DATABASE_URL` — configured directly in the Railway dashboard as a Cron Job service, not a checked-in config file (a third service sharing the repo root can't share the default-discovered `railway.json` filename with `api`) |
+| backup cron | `db/scripts/Dockerfile` | No | Runs `db/scripts/backup.sh` on a schedule against the private `DATABASE_URL` — `db/scripts/railway.json` sets `dockerfilePath: db/scripts/Dockerfile`, so it no longer needs to share the root-level `railway.json` with the `api` service |
 
 Neither `Dockerfile` builds the `stellar` CLI from source anymore. The root `Dockerfile` (the `api`
 service) never did; `reconciler/Dockerfile` used to (`cargo install --locked stellar-cli`, for
@@ -563,23 +594,6 @@ very large number in the container) or a real error, at which point the platform
 policy relaunches it — same safety net `while true; do cargo run -- watch ...; done` provides locally.
 
 See `.env.example` for the complete list of environment variables to set on each service.
-
-### Render (the `api` service only)
-
-`render.yaml` at repo root is a Blueprint for just the `api` service plus a managed Postgres —
-Render's free tier doesn't offer background workers or cron jobs, so the `reconciler` and backup
-cron still need Railway (or any host that supports a long-running process) until that changes.
-This is meant for getting the API itself reachable quickly — a live checkout flow needs the
-reconciler too, but login, link creation, and the admin pages all work against `api` alone.
-
-Render auto-detects `render.yaml` when you connect the repo: **New +** → **Blueprint** → pick
-`Konfirm-xyz/konfirm-backend`. It provisions the free Postgres and the web service, generates
-`JWT_SECRET`/`ADMIN_JWT_SECRET`, and runs `npm run migrate:up` before every start. Four values are
-marked `sync: false` in the blueprint and need to be pasted in by hand on the Render dashboard
-before the first deploy will boot cleanly: `APP_URL` (the Vercel frontend's URL),
-`FACILITATOR_SECRET_KEY`, `STELLAR_DEPLOYER_SECRET_KEY`, and `PLATFORM_FEE_SECRET_KEY` — see [Keys](docs/KEYS.md) for what each one is. Render deletes its free
-Postgres databases 30 days after creation, unconditionally, not just on inactivity — treat this as
-a demo/pilot deployment, not the long-term home for real merchant data.
 
 ### What only a human can do here
 

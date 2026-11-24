@@ -19,7 +19,7 @@ Branch protection prevents accidental or malicious modifications to the main bra
    - ✓ Require status checks to pass before merging
    - ✓ Require branches to be up to date before merging
    - ✓ Dismiss stale pull request approvals when new commits are pushed
-   - ✓ Include administrators (recommended)
+   - ✓ Include administrators (required — see #268)
    - ✓ Restrict who can push to matching branches
    - ✓ Allow force pushes → None
    - ✓ Allow deletions → unchecked
@@ -29,10 +29,18 @@ Branch protection prevents accidental or malicious modifications to the main bra
 
 6. Click "Create" to save the rule
 
+The same rule is declared in `.github/settings.yml` (`branches[0].protection`)
+so the Settings app keeps it in sync. `enforce_admins` is `true` and there is
+no bypass list: admins are subject to the required review and the `test`
+check exactly like everyone else. Do not re-enable "Do not require
+administrators" or add an admin bypass — that reopens #268.
+
 **Verification:**
 - Try to push directly to main → should be rejected
 - Create a PR but don't wait for CI → merge button should be disabled
 - Merge a PR after CI passes → should succeed
+- As an admin, open a PR with a failing/absent `test` check → merge must be
+  rejected (no "Merge without waiting for requirements" / bypass option)
 
 ---
 
@@ -72,11 +80,47 @@ These issues have been fixed in the code:
 ### #118: GitHub Actions Security
 - **Status**: ✓ Fixed  
 - **Changes**:
-  - Pinned `actions/checkout@v4` to commit SHA: `11d59607cc989b6c31a8b6f5ee0e3ad0e9a6b297`
-  - Pinned `actions/setup-node@v4` to commit SHA: `39370e3970a6d050c480ffad4ff0ed4d3fdee5cb`
+  - Pinned `actions/checkout@v4.2.2` to commit SHA: `11bd71901bbe5b1630ceea73d27597364c9af683`
+  - Pinned `actions/setup-node@v4.1.0` to commit SHA: `39370e3970a6d050c480ffad4ff0ed4d3fdee5af`
   - Actions are now immutable and auditable
+
+**Verification**: the SHAs above are the real tag SHAs, fetched from GitHub's API, and match the pins in `.github/workflows/ci.yml`:
+
+```
+$ gh api repos/actions/checkout/git/refs/tags/v4.2.2 --jq '.object.sha'
+11bd71901bbe5b1630ceea73d27597364c9af683
+$ gh api repos/actions/setup-node/git/refs/tags/v4.1.0 --jq '.object.sha'
+39370e3970a6d050c480ffad4ff0ed4d3fdee5af
+```
+
+To re-verify at any time, run the two commands above and compare against the `uses:` lines in `.github/workflows/ci.yml`.
   
 **Note**: Repository-level GitHub Actions permissions (`allowed_actions: "selected"`) must still be configured via Settings → Code security and analysis → GitHub Actions → Permissions (see issue #118 for details).
+
+---
+
+## Issue #283: Require SHA Pinning for Actions
+
+GitHub can reject any workflow that references an action by tag or branch instead of a full-length commit SHA. This makes the pinning in #118 enforced rather than a convention.
+
+**Steps to enable:**
+
+1. Navigate to Settings → Actions → General
+2. Under "Workflow permissions", enable **Require actions to be pinned to a full-length commit SHA**
+3. Or apply it with the API:
+
+   ```sh
+   gh api -X PUT repos/Konfirm-xyz/konfirm-backend/actions/permissions \
+     -f sha_pinning_required=true
+   ```
+
+The same value is declared in `.github/settings.yml` (`repository.sha_pinning_required: true`) so the Settings app keeps it applied.
+
+**Verification:**
+
+- `gh api repos/Konfirm-xyz/konfirm-backend/actions/permissions` → `"sha_pinning_required": true`
+- Open a PR that changes a workflow step to `uses: actions/checkout@v4` → the workflow is rejected before merge
+- Every `uses:` in `.github/workflows/` points at a 40-character commit SHA
 
 ---
 

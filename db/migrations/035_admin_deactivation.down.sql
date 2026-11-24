@@ -1,0 +1,3 @@
+ALTER TABLE admins
+  DROP COLUMN IF EXISTS deactivated_at,
+  DROP COLUMN IF EXISTS status;

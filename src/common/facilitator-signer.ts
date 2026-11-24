@@ -4,7 +4,7 @@ import { createEd25519Signer } from '@x402/stellar';
 import type { Ed25519Signer } from '@x402/stellar';
 import { Keypair } from '@stellar/stellar-sdk';
 import { createKmsEd25519Signer } from './kms-ed25519-signer';
-import { NETWORK_CAIP2 } from './stellar-network';
+import { NETWORK_CAIP2, TREASURY_SIGNERS } from './stellar-network';
 
 const execFileAsync = promisify(execFile);
 
@@ -92,7 +92,51 @@ export function assertKmsFacilitatorIsSeparate(facilitatorAddress: string, env: 
   }
 }
 
+// Boot-time counterpart to assertSeparateHotKeys for the KMS path: derive the
+// facilitator address from KMS and run the same separation check before the
+// app accepts traffic, instead of waiting for the first signer use. A no-op
+// when FACILITATOR_KMS_KEY_ID is unset (raw-key path, covered above).
+export async function assertKmsFacilitatorIsSeparateAtBoot(env: NodeJS.ProcessEnv = process.env): Promise<void> {
+  const kmsKeyId = env.FACILITATOR_KMS_KEY_ID;
+  if (!kmsKeyId) return;
+  const signer = await createKmsEd25519Signer(kmsKeyId);
+  assertKmsFacilitatorIsSeparate(signer.address, env);
+}
+
 let signerPromise: Promise<Ed25519Signer> | null = null;
+
+// Treasury signers (deployer/signer2/signer3) are cold identities: they
+// only ever sign propose_settlement/approve_settlement/execute_settlement,
+// never a hot path. Each one is configured as a KMS key id
+// (TREASURY_SIGNER_KMS_KEY_IDS, comma-separated, same order as
+// TREASURY_SIGNERS) so the private key material never exists in this
+// process -- see kms-ed25519-signer.ts. Memoized per key id: deriving the
+// address is a KMS GetPublicKey round trip, not something to repeat per
+// request.
+const treasurySignerPromises = new Map<string, Promise<Ed25519Signer>>();
+
+export function getTreasurySigner(kmsKeyId: string): Promise<Ed25519Signer> {
+  let promise = treasurySignerPromises.get(kmsKeyId);
+  if (!promise) {
+    promise = createKmsEd25519Signer(kmsKeyId);
+    treasurySignerPromises.set(kmsKeyId, promise);
+  }
+  return promise;
+}
+
+// Resolves the KMS key id configured for a treasury signer's on-chain
+// address. Returns null when that signer has no KMS key configured, which
+// is the signal to fall back to the manual Freighter build/submit path --
+// this ships dark, exactly like FACILITATOR_KMS_KEY_ID does.
+export function treasurySignerKeyIdFor(address: string): string | null {
+  const keyIds = (process.env.TREASURY_SIGNER_KMS_KEY_IDS ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const index = TREASURY_SIGNERS.indexOf(address);
+  if (index === -1) return null;
+  return keyIds[index] ?? null;
+}
 
 // Ships dark: FACILITATOR_KMS_KEY_ID unset means byte-for-byte the same
 // behavior as before this change (raw secret key, env var or CLI
@@ -140,6 +184,26 @@ export function withFacilitatorSubmissionLock<T>(fn: () => Promise<T>): Promise<
   submissionQueue = run.then(
     () => undefined,
     () => undefined,
+  );
+  return run;
+}
+
+// Same one-in-flight-per-source-account reasoning as above, but keyed by
+// the treasury signer's own address: each treasury signer is a distinct
+// account with its own sequence number, so two settlements signed by the
+// same signer must not race, while signer2 and signer3 can proceed in
+// parallel.
+const treasurySubmissionQueues = new Map<string, Promise<unknown>>();
+
+export function withTreasurySignerSubmissionLock<T>(address: string, fn: () => Promise<T>): Promise<T> {
+  const previous = treasurySubmissionQueues.get(address) ?? Promise.resolve();
+  const run = previous.then(fn, fn);
+  treasurySubmissionQueues.set(
+    address,
+    run.then(
+      () => undefined,
+      () => undefined,
+    ),
   );
   return run;
 }

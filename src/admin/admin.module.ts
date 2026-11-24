@@ -3,6 +3,7 @@ import { AdminAuthModule } from '../admin-auth/admin-auth.module';
 import { AuthModule } from '../auth/auth.module';
 import { WithdrawalsModule } from '../withdrawals/withdrawals.module';
 import { FacilitatorModule } from '../facilitator/facilitator.module';
+import { MAILER, mailerFromEnv } from '../mail/mailer';
 import { AdminController } from './admin.controller';
 import { AdminTreasurySettlementsController } from './admin-treasury-settlements.controller';
 import { AdminTreasurySettlementsService } from './admin-treasury-settlements.service';
@@ -26,9 +27,11 @@ import { AdminExchangeRateService } from './admin-exchange-rate.service';
 import { AdminReferralsService } from './admin-referrals.service';
 import { AdminBazaarService } from './admin-bazaar.service';
 import { AdminTeamService } from './admin-team.service';
+import { X402Module } from '../x402/x402.module';
+import { WebhooksModule } from '../webhooks/webhooks.module';
 
 @Module({
-  imports: [AdminAuthModule, AuthModule, WithdrawalsModule, FacilitatorModule],
+  imports: [AdminAuthModule, AuthModule, WithdrawalsModule, FacilitatorModule, X402Module, WebhooksModule],
   controllers: [AdminController, AdminTreasurySettlementsController],
   providers: [
     AdminTreasurySettlementsService,
@@ -52,6 +55,7 @@ import { AdminTeamService } from './admin-team.service';
     AdminReferralsService,
     AdminBazaarService,
     AdminTeamService,
+    { provide: MAILER, useFactory: () => mailerFromEnv() },
   ],
 })
 export class AdminModule {}

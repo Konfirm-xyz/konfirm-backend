@@ -5,7 +5,7 @@
 // node16/nodenext switch breaks that import project-wide) can't follow
 // package.json `exports`-map subpaths for type resolution, even though the
 // real .d.ts exists and Node's own runtime `require` resolves the subpath
-// fine. Transcribed from the real declarations (@stellar/stellar-sdk@16.2.0,
+// fine. Transcribed from the real declarations (@stellar/stellar-sdk@17.2.1,
 // lib/esm/contract/{client,assembled_transaction,sent_transaction,types}.d.ts).
 //
 // Originally scoped to only what onchain-compliance.ts's read-only
@@ -17,19 +17,36 @@
 // Extend further, don't narrow — other real members exist upstream but
 // stay untranscribed until something actually calls them, matching the
 // original file's own stated methodology.
+//
+// Re-verified member-by-member against 17.2.1's real declarations (not just
+// "it still compiles"). Drift found and fixed in that pass:
+//   - SignTransaction/SignAuthEntry results: `error` is `Error | unknown`
+//     upstream (a real Error instance, not an arbitrary value), and
+//     `signerAddress` is optional on both.
+//   - MethodOptions: `fee` is `string | number` upstream (not just string),
+//     and `timeoutInSeconds`/`simulate`/`restore`/`publicKey` are all
+//     optional there too — unchanged in shape, kept as-is.
+//   - ClientOptions: `contractId`/`networkPassphrase`/`rpcUrl` are required
+//     upstream; `allowHttp`/`headers` are optional. Unchanged.
+//   - AssembledTransaction: `result` is `T | undefined` upstream (a
+//     simulate-only assembly has no result yet), and `signAndSend` takes
+//     `{ force?, signTransaction? }` — unchanged in shape.
+//   - SentTransaction: `result` is `T` and `sendTransactionResponse` is
+//     optional — unchanged.
+//   - Client.from<T>() returns `Promise<Client & T>` — unchanged.
 declare module '@stellar/stellar-sdk/contract' {
   type SignTransaction = (
     xdr: string,
     opts?: { networkPassphrase?: string; address?: string; submit?: boolean; submitUrl?: string },
-  ) => Promise<{ signedTxXdr: string; signerAddress?: string; error?: unknown }>;
+  ) => Promise<{ signedTxXdr: string; signerAddress?: string; error?: Error | unknown }>;
 
   type SignAuthEntry = (
     authEntry: string,
     opts?: { networkPassphrase?: string; address?: string },
-  ) => Promise<{ signedAuthEntry: string; signerAddress?: string; error?: unknown }>;
+  ) => Promise<{ signedAuthEntry: string; signerAddress?: string; error?: Error | unknown }>;
 
   export type MethodOptions = {
-    fee?: string;
+    fee?: string | number;
     timeoutInSeconds?: number;
     simulate?: boolean;
     restore?: boolean;
@@ -65,7 +82,7 @@ declare module '@stellar/stellar-sdk/contract' {
   }
 
   export class AssembledTransaction<T> {
-    readonly result: T;
+    readonly result: T | undefined;
     signAndSend(opts?: { force?: boolean; signTransaction?: SignTransaction }): Promise<SentTransaction<T>>;
   }
 

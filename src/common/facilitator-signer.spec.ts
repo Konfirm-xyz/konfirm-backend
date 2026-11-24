@@ -1,5 +1,5 @@
 import { Keypair } from '@stellar/stellar-sdk';
-import { assertKmsFacilitatorIsSeparate, assertSeparateHotKeys } from './facilitator-signer';
+import { assertKmsFacilitatorIsSeparate, assertSeparateHotKeys, withFacilitatorSubmissionLock } from './facilitator-signer';
 
 // Same KMS-client-boundary mock as kms-ed25519-signer.spec.ts: the public key
 // fed through it comes from a real keypair, so the derived address is real.
@@ -140,5 +140,38 @@ describe('getFacilitatorSigner (KMS path)', () => {
     await expect(freshGetFacilitatorSigner()()).rejects.toThrow(
       /FACILITATOR_KMS_KEY_ID and PLATFORM_FEE_ADDRESS are the same account/,
     );
+  });
+});
+
+// ── withFacilitatorSubmissionLock ─────────────────────────────────────────────
+
+describe('withFacilitatorSubmissionLock', () => {
+  it('runs calls strictly in order, never overlapping', async () => {
+    const order: number[] = [];
+    // Three calls that all start before any resolves.
+    const p1 = withFacilitatorSubmissionLock(async () => { order.push(1); });
+    const p2 = withFacilitatorSubmissionLock(async () => { order.push(2); });
+    const p3 = withFacilitatorSubmissionLock(async () => { order.push(3); });
+    await Promise.all([p1, p2, p3]);
+    expect(order).toEqual([1, 2, 3]);
+  });
+
+  it('advances the queue even when an earlier call rejects', async () => {
+    const results: string[] = [];
+    const reject = withFacilitatorSubmissionLock(() => Promise.reject(new Error('submission failed')));
+    const after = withFacilitatorSubmissionLock(async () => { results.push('ran'); });
+    await expect(reject).rejects.toThrow('submission failed');
+    await after;
+    expect(results).toEqual(['ran']);
+  });
+
+  it('does not let an earlier rejection prevent a later call from running', async () => {
+    const ran: boolean[] = [];
+    for (let i = 0; i < 3; i++) {
+      withFacilitatorSubmissionLock(() => Promise.reject(new Error(`fail ${i}`))).catch(() => undefined);
+    }
+    const last = withFacilitatorSubmissionLock(async () => { ran.push(true); });
+    await last;
+    expect(ran).toEqual([true]);
   });
 });

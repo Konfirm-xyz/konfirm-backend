@@ -12,7 +12,7 @@ import { zodBody } from '../common/zod-to-openapi';
 const AUTH_THROTTLE = { default: { limit: 10, ttl: 60_000 } };
 
 const loginSchema = z.object({
-  email: z.string().email(),
+  email: z.string().trim().toLowerCase().email(),
   password: z.string().min(1),
 });
 

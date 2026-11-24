@@ -1,6 +1,7 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { pool } from '../db/pool';
+import { MAILER, Mailer, paymentConfirmedMail } from '../mail/mailer';
 import { PaymentAttestationService } from './payment-attestation.service';
 
 // Arbitrary but stable pg_advisory_lock key -- namespaced away from
@@ -11,7 +12,33 @@ import { PaymentAttestationService } from './payment-attestation.service';
 // keeper (two independent pg.Pool instances, two concurrent sweep() calls,
 // exactly one real on-chain checkpoint landed).
 const ATTESTATION_LOCK_KEY = 402_004;
+// Void reconciliation (issue #189) is a separate sweep with its own key so a
+// slow attestation batch can never starve it.
+const VOID_LOCK_KEY = 402_005;
 const BATCH_SIZE = 20;
+// A claim older than this is treated as abandoned (process died mid-attest)
+// and retried. Long enough to cover a slow Soroban submission, short enough
+// that a crashed sweep doesn't strand a payment for long.
+const CLAIM_STALE_AFTER = '15 minutes';
+
+// Retry pacing for a payment whose attestation keeps failing (#68). Without
+// this, a permanently-failing row is re-picked first every sweep (ORDER BY
+// created_at ASC) and can starve newer payments out of every batch. A
+// failure backs off exponentially from one sweep interval up to the cap;
+// past MAX_ATTESTATION_FAILURES the row is dead-lettered -- no longer
+// selected at all -- and left for a human via the stuck-attestation admin
+// notification. Same shape as ChannelKeeperService's keeper backoff.
+const ATTESTATION_BACKOFF_BASE_MS = 2 * 60_000;
+const ATTESTATION_BACKOFF_CAP_MS = 60 * 60_000;
+const MAX_ATTESTATION_FAILURES = 10;
+
+// `failureCount` includes the failure being scheduled (so it's >= 1).
+// +/-20% jitter so rows that started failing together during one RPC outage
+// don't all retry on the same sweep when it recovers.
+export function attestationBackoffMs(failureCount: number, random: () => number = Math.random): number {
+  const base = Math.min(ATTESTATION_BACKOFF_CAP_MS, ATTESTATION_BACKOFF_BASE_MS * 2 ** Math.max(0, failureCount - 1));
+  return Math.round(base * (0.8 + 0.4 * random()));
+}
 
 interface AttestationDueRow {
   id: string;
@@ -20,6 +47,7 @@ interface AttestationDueRow {
   net_usdc: string;
   tx_hash: string;
   merchant_address: string;
+  attestation_failure_count: number;
 }
 
 // In-process @Cron(), the fourth instance of this exact architecture in
@@ -31,7 +59,10 @@ interface AttestationDueRow {
 export class PaymentAttestationSweeperService {
   private readonly logger = new Logger(PaymentAttestationSweeperService.name);
 
-  constructor(private readonly attestation: PaymentAttestationService) {}
+  constructor(
+    private readonly attestation: PaymentAttestationService,
+    @Inject(MAILER) private readonly mailer: Mailer,
+  ) {}
 
   @Cron('*/2 * * * *')
   async sweep(): Promise<void> {
@@ -56,15 +87,69 @@ export class PaymentAttestationSweeperService {
     }
   }
 
+  // Reconciles on-chain voids back into Postgres: a payment that was voided
+  // on-chain (payment contract's void_payment) must stop counting as revenue
+  // and stop reading as 'paid' in merchant/admin history. Only rows that were
+  // actually attested on-chain can be voided there, so onchain_payment_id is
+  // the join key.
+  @Cron('*/5 * * * *')
+  async sweepVoids(): Promise<void> {
+    const client = await pool.connect();
+    try {
+      const { rows } = await client.query<{ locked: boolean }>('SELECT pg_try_advisory_lock($1) AS locked', [
+        VOID_LOCK_KEY,
+      ]);
+      if (!rows[0].locked) return;
+      try {
+        await this.doVoidSweep();
+      } finally {
+        await client.query('SELECT pg_advisory_unlock($1)', [VOID_LOCK_KEY]);
+      }
+    } catch (err) {
+      this.logger.error(`void sweep failed: ${err}`);
+    } finally {
+      client.release();
+    }
+  }
+
+  private async doVoidSweep(): Promise<void> {
+    const { rows } = await pool.query<{ id: string; onchain_payment_id: string }>(
+      `SELECT id, onchain_payment_id
+       FROM payments
+       WHERE status = 'paid' AND onchain_payment_id IS NOT NULL
+       ORDER BY created_at ASC
+       LIMIT $1`,
+      [BATCH_SIZE],
+    );
+
+    for (const row of rows) {
+      try {
+        if (!(await this.attestation.isVoided(row.onchain_payment_id))) continue;
+        await pool.query(
+          `UPDATE payments SET status = 'voided', voided_at = NOW() WHERE id = $1 AND status = 'paid'`,
+          [row.id],
+        );
+      } catch (err) {
+        // One row's failure must never abort the batch; the next sweep
+        // retries it.
+        this.logger.error(`void reconciliation errored for payment ${row.id}: ${err}`);
+      }
+    }
+  }
+
   private async doSweep(): Promise<void> {
     const { rows } = await pool.query<AttestationDueRow>(
-      `SELECT p.id, p.payer_address, p.muxed_id, p.net_usdc, p.tx_hash, m.stellar_base_address AS merchant_address
+      `SELECT p.id, p.payer_address, p.muxed_id, p.net_usdc, p.tx_hash, m.stellar_base_address AS merchant_address,
+              p.attestation_failure_count
        FROM payments p
        JOIN merchants m ON m.id = p.merchant_id
        WHERE p.status = 'paid' AND p.attested_at IS NULL
+         AND (p.attestation_claimed_at IS NULL OR p.attestation_claimed_at < NOW() - $2::interval)
+         AND p.attestation_failure_count < $3
+         AND (p.attestation_next_attempt_at IS NULL OR p.attestation_next_attempt_at <= NOW())
        ORDER BY p.created_at ASC
        LIMIT $1`,
-      [BATCH_SIZE],
+      [BATCH_SIZE, CLAIM_STALE_AFTER, MAX_ATTESTATION_FAILURES],
     );
 
     for (const row of rows) {
@@ -75,11 +160,30 @@ export class PaymentAttestationSweeperService {
         // could theoretically change after the fact. Skip rather than
         // attest with a null address; leaves the row for a human to
         // investigate via the stuck-attestation admin notification below.
+        // Recorded as a failure too, so a merchant that never gets an
+        // address can't occupy a batch slot on every sweep forever.
         this.logger.warn(`payment ${row.id} has no merchant address on file, skipping attestation`);
+        await this.recordFailure(row, 'missing_merchant_address');
         continue;
       }
 
       try {
+        // Claim the row *before* the on-chain call. If the write-back below
+        // fails after a successful attest(), the claim stays set, so the next
+        // sweep skips this row instead of submitting a second on-chain
+        // record_payment for the same payment. Only a claim older than
+        // CLAIM_STALE_AFTER is retried.
+        const claim = await pool.query(
+          `UPDATE payments SET attestation_claimed_at = NOW()
+           WHERE id = $1 AND attested_at IS NULL
+             AND (attestation_claimed_at IS NULL OR attestation_claimed_at < NOW() - $2::interval)`,
+          [row.id, CLAIM_STALE_AFTER],
+        );
+        if (claim.rowCount === 0) {
+          // Another sweep claimed it first.
+          continue;
+        }
+
         const result = await this.attestation.attest({
           merchantAddress: row.merchant_address,
           payerAddress: row.payer_address,
@@ -90,20 +194,88 @@ export class PaymentAttestationSweeperService {
 
         if (!result.success) {
           this.logger.warn(`attestation failed for payment ${row.id}: ${result.errorReason}`);
+          // Release the claim so the next sweep retries promptly rather than
+          // waiting out CLAIM_STALE_AFTER.
+          await pool.query(`UPDATE payments SET attestation_claimed_at = NULL WHERE id = $1 AND attested_at IS NULL`, [
+            row.id,
+          ]);
+          await this.recordFailure(row, result.errorReason);
           continue;
         }
 
         await pool.query(
-          `UPDATE payments SET onchain_payment_id = $2, attested_at = NOW() WHERE id = $1 AND attested_at IS NULL`,
+          `UPDATE payments SET onchain_payment_id = $2, attested_at = NOW(), attestation_claimed_at = NULL
+           WHERE id = $1 AND attested_at IS NULL`,
           [row.id, result.onchainPaymentId],
         );
+
+        // The payment is now attested on-chain, i.e. confirmed as 'paid'.
+        // Best-effort, same shape as the referral-earned mail: a mail failure
+        // is logged and swallowed so it never retries or unwinds the
+        // already-committed attestation.
+        await this.notifyConfirmed(row.id);
       } catch (err) {
         // One row's failure -- attestation or the write-back after it --
-        // must never abort the rest of the batch. Left unattested; the
-        // next sweep retries it, same self-healing shape as every other
-        // sweeper in this codebase.
+        // must never abort the rest of the batch. Recorded and backed off
+        // like any other failure so it can't starve the rest of the backlog.
+        // The claim set above is deliberately *not* cleared here: if the
+        // failure came after a successful on-chain attest(), retrying
+        // immediately would submit a duplicate record_payment. The
+        // stale-claim window bounds the wait instead.
         this.logger.error(`attestation errored for payment ${row.id}: ${err}`);
+        await this.recordFailure(row, String(err));
       }
+    }
+  }
+
+  private async notifyConfirmed(paymentId: string): Promise<void> {
+    try {
+      const { rows } = await pool.query<{ email: string | null; amount_usdc: string; asset_code: string }>(
+        `SELECT m.email, p.amount_usdc, p.asset_code
+         FROM payments p
+         JOIN merchants m ON m.id = p.merchant_id
+         WHERE p.id = $1`,
+        [paymentId],
+      );
+      const row = rows[0];
+      if (!row?.email) return;
+      await this.mailer.send(
+        paymentConfirmedMail({
+          merchantEmail: row.email,
+          amount: row.amount_usdc,
+          currency: row.asset_code,
+          reference: paymentId,
+        }),
+      );
+    } catch (err) {
+      this.logger.error(`failed to send payment-confirmed email for payment ${paymentId}: ${err}`);
+    }
+  }
+
+  // `previousFailures` comes from the row read at the start of this sweep;
+  // sweeps never overlap (advisory lock), so nothing else can have changed
+  // it in between. Past MAX_ATTESTATION_FAILURES the row drops out of the
+  // sweep's WHERE clause entirely (dead-lettered) and is only visible to a
+  // human via the stuck-attestation admin notification.
+  private async recordFailure(row: AttestationDueRow, errorReason: string | undefined): Promise<void> {
+    const failures = row.attestation_failure_count + 1;
+    const delayMs = attestationBackoffMs(failures);
+    try {
+      await pool.query(
+        `UPDATE payments
+         SET attestation_failure_count = $2, attestation_last_error = $3,
+             attestation_last_attempt_at = NOW(),
+             attestation_next_attempt_at = NOW() + ($4 * INTERVAL '1 millisecond')
+         WHERE id = $1 AND attested_at IS NULL`,
+        [row.id, failures, errorReason ?? null, delayMs],
+      );
+      if (failures >= MAX_ATTESTATION_FAILURES) {
+        this.logger.error(
+          `payment ${row.id} dead-lettered after ${failures} attestation failures: ${errorReason}`,
+        );
+      }
+    } catch (err) {
+      this.logger.error(`failed to record attestation failure for payment ${row.id}: ${err}`);
     }
   }
 }

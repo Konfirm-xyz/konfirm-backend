@@ -190,24 +190,20 @@ describe('validation coverage: signup address, admin enums, pagination, rate lim
         [merchantEmail],
       );
       const linkId = result.rows[0]?.id;
+      expect(linkId).toBeDefined();
 
-      if (linkId) {
-        const paymentResult = await pool.query(
-          `INSERT INTO payments (link_id, merchant_id, amount_usdc, currency, status, payer)
-           VALUES ($1, (SELECT id FROM merchants WHERE email = $2), '5.00', 'XLM', 'pending', 'GDIET4T37N35XU4FY52RMR4Z653WYFITEHGIJXN4VEQTDYR5JSURJDPL')
-           RETURNING id`,
-          [linkId, merchantEmail],
-        );
-        paymentId = paymentResult.rows[0]?.id;
-      }
+      const paymentResult = await pool.query(
+        `INSERT INTO payments (link_id, merchant_id, amount_usdc, currency, status, payer)
+         VALUES ($1, (SELECT id FROM merchants WHERE email = $2), '5.00', 'XLM', 'pending', 'GDIET4T37N35XU4FY52RMR4Z653WYFITEHGIJXN4VEQTDYR5JSURJDPL')
+         RETURNING id`,
+        [linkId, merchantEmail],
+      );
+      paymentId = paymentResult.rows[0]?.id;
+      expect(paymentId).toBeDefined();
     });
 
     it('rejects an invalid status value for setPaymentStatus', async () => {
-      if (!paymentId) {
-        // Skip if payment creation failed
-        expect(true).toBe(true);
-        return;
-      }
+      expect(paymentId).toBeDefined(); // Setup must succeed; fix beforeEach if this fails
 
       const res = await request(app.getHttpServer())
         .patch(`/admin/payments/${paymentId}/status`)
@@ -219,10 +215,7 @@ describe('validation coverage: signup address, admin enums, pagination, rate lim
     });
 
     it('accepts valid status values: paid, held, disputed', async () => {
-      if (!paymentId) {
-        expect(true).toBe(true);
-        return;
-      }
+      expect(paymentId).toBeDefined(); // Setup must succeed; fix beforeEach if this fails
 
       const statuses = ['paid', 'held', 'disputed'];
       for (const status of statuses) {
@@ -346,10 +339,7 @@ describe('validation coverage: signup address, admin enums, pagination, rate lim
 
   describe('payment status response includes payer-facing status', () => {
     it('includes status information in payment responses', async () => {
-      if (!paymentId) {
-        expect(true).toBe(true);
-        return;
-      }
+      expect(paymentId).toBeDefined(); // Setup must succeed; fix beforeEach if this fails
 
       const res = await request(app.getHttpServer())
         .patch(`/admin/payments/${paymentId}/status`)

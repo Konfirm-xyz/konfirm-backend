@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { APP_FILTER, APP_GUARD } from '@nestjs/core';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ReconcilerWatchdogService } from './observability/reconciler-watchdog.service';
+import { ComplianceCanaryService } from './observability/compliance-canary.service';
 import { FeesModule } from './fees/fees.module';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { LoggerModule } from 'nestjs-pino';
@@ -18,6 +19,7 @@ import { X402Module } from './x402/x402.module';
 import { ReferralsModule } from './referrals/referrals.module';
 import { FacilitatorModule } from './facilitator/facilitator.module';
 import { BazaarModule } from './bazaar/bazaar.module';
+import { WebhooksModule } from './webhooks/webhooks.module';
 import { HealthModule } from './health/health.module';
 
 const isProd = process.env.NODE_ENV === 'production';
@@ -73,11 +75,13 @@ const isProd = process.env.NODE_ENV === 'production';
     ReferralsModule,
     FacilitatorModule,
     BazaarModule,
+    WebhooksModule,
     FeesModule,
     HealthModule,
   ],
   providers: [
     ReconcilerWatchdogService,
+    ComplianceCanaryService,
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
   ],

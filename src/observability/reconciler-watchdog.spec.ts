@@ -1,3 +1,4 @@
+import { Keypair } from '@stellar/stellar-sdk';
 import { pool } from '../db/pool';
 import { FacilitatorSpendGuardService } from '../facilitator/facilitator-spend-guard.service';
 import { ReconcilerWatchdogService } from './reconciler-watchdog.service';
@@ -47,6 +48,12 @@ describe('ReconcilerWatchdogService', () => {
       `INSERT INTO merchants (name, email, password_hash, status, stellar_base_address)
        VALUES ('Watchdog Fixture', $1, 'test', 'active', $2) RETURNING id`,
       [fixtureEmail, 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN7'],
+    // Own the active-merchant fixture so the stalled branch is always
+    // exercised, instead of depending on whatever the test DB holds.
+    const { rows } = await pool.query(
+      `INSERT INTO merchants (email, password_hash, name, status, stellar_base_address)
+       VALUES ($1, 'test', 'watchdog fixture', 'active', $2) RETURNING id`,
+      [fixtureEmail, Keypair.random().publicKey()],
     );
     fixtureMerchantId = rows[0].id;
     await pool.query("UPDATE reconciler_state SET updated_at = NOW() - INTERVAL '30 minutes'");

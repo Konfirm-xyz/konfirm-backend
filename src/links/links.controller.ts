@@ -1,5 +1,5 @@
-import { Body, Controller, Get, HttpCode, Param, Post, Req, UseGuards } from '@nestjs/common';
-import { ApiBody, ApiCookieAuth, ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { Body, Controller, Get, HttpCode, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { ApiBody, ApiCookieAuth, ApiOperation, ApiParam, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { z } from 'zod';
 import { ZodValidationPipe } from '../zod-validation.pipe';
 import { AuthedRequest, AuthGuard } from '../auth/auth.guard';
@@ -15,7 +15,9 @@ const createLinkSchema = z.object({
   // A link with amount_usdc = "0" is unpayable: the Stellar SDK rejects
   // Operation.payment({ amount: "0" }), so payers would hit a generic 500.
   // Reject zero (and any non-positive value) at creation time with a 400.
-  amount_usdc: nonNegativeDecimalStringSchema('amount_usdc', 7, 999_999_999_999_999_999n)
+  // Bounded to Stellar's max int64 stroop amount: anything larger parses fine
+  // but throws inside Operation.payment() at payment time, surfacing as a 500.
+  amount_usdc: nonNegativeDecimalStringSchema('amount_usdc', 7, 9_223_372_036_854_775_807n)
     .refine((value) => Number(value) > 0, {
       message: 'amount_usdc must be greater than 0',
     })
@@ -74,12 +76,22 @@ export class LinksController {
   @ApiCookieAuth('merchant-session')
   @ApiOperation({
     summary: "List the authenticated merchant's payment links",
-    description: 'Returns links newest-first with a live use_count (confirmed payments only).',
+    description: 'Returns links newest-first with a live use_count (confirmed payments only). Use limit and offset to paginate past 50.',
   })
+  @ApiQuery({ name: 'limit', required: false, description: 'Max results per page (1–500, default 50)', type: 'number' })
+  @ApiQuery({ name: 'offset', required: false, description: 'Number of results to skip (default 0)', type: 'number' })
   @ApiResponse({ status: 200, description: 'Array of link records.' })
   @ApiResponse({ status: 401, description: 'Not authenticated.' })
-  listMine(@Req() req: AuthedRequest) {
-    return this.links.listForMerchant(req.merchant.id);
+  listMine(
+    @Req() req: AuthedRequest,
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+  ) {
+    return this.links.listForMerchant(
+      req.merchant.id,
+      limit !== undefined ? parseInt(limit, 10) : undefined,
+      offset !== undefined ? parseInt(offset, 10) : undefined,
+    );
   }
 
   @Get(':id/public')

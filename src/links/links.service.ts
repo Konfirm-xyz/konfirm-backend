@@ -2,6 +2,7 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { pool } from '../db/pool';
 import { getEffectiveFeeBps } from '../common/effective-fee';
 import { owedFee, platformFeeFloor } from '../common/money-rules';
+import { isUuid } from '../common/numeric-validation';
 
 export interface CreateLinkInput {
   merchant_id: string;
@@ -45,11 +46,12 @@ export class LinksService {
     return existing.rows[0];
   }
 
-  // Merchant-scoped by session, same shape as payments.service.ts's
-  // listForMerchant — newest first, no pagination params (mirrors that
-  // route's own fixed LIMIT rather than inventing admin-style limit/offset
-  // for a dashboard list that doesn't need it yet).
-  async listForMerchant(merchantId: string) {
+  // Merchant-scoped by session, newest first. Accepts limit (1–500,
+  // default 50) and offset for page-based access so merchants with more
+  // than 100 links can retrieve all of them (issue #366).
+  async listForMerchant(merchantId: string, limit = 50, offset = 0) {
+    const safeLimit = Math.min(Math.max(1, limit), 500);
+    const safeOffset = Math.max(0, offset);
     const { rows } = await pool.query(
       `SELECT l.id, l.amount_usdc, l.currency, l.description, l.reusable, l.max_uses,
               l.expires_at, l.active, l.created_at,
@@ -59,8 +61,8 @@ export class LinksService {
        WHERE l.merchant_id = $1
        GROUP BY l.id
        ORDER BY l.created_at DESC
-       LIMIT 100`,
-      [merchantId],
+       LIMIT $2 OFFSET $3`,
+      [merchantId, safeLimit, safeOffset],
     );
     return rows;
   }
@@ -70,6 +72,7 @@ export class LinksService {
   // but belongs to someone else returns 404, not 403 — never confirms to
   // the caller that the id exists at all.
   async deactivate(id: string, merchantId: string) {
+    if (!isUuid(id)) throw new NotFoundException('link not found');
     const { rows } = await pool.query(
       `UPDATE links SET active = false
        WHERE id = $1 AND merchant_id = $2
@@ -84,6 +87,9 @@ export class LinksService {
   // merchant internals, matching the same principle the invoice public
   // projection enforced in the original design.
   async getPublic(id: string) {
+    // A non-UUID id would make Postgres throw on the uuid cast — a raw 500
+    // (and Sentry capture) for what is really just "no such link".
+    if (!isUuid(id)) throw new NotFoundException('link not found');
     const { rows } = await pool.query(
       `SELECT l.id, l.amount_usdc, l.currency, l.description, l.active, l.expires_at,
               m.id AS merchant_id, m.name AS merchant_name, m.stellar_base_address

@@ -5,19 +5,47 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  pull_request_target:
-    branches: [main]
 
-# Explicitly allow fork PRs to run workflows. When pull_request_target is used,
-# this workflow will run in the context of the base repository with access to
-# secrets, which is appropriate for public fork PRs that have been reviewed.
-# For security: only run on pull_request events from trusted contributors or
-# after manual approval. See GitHub Actions > General settings for fork PR policy.
+# This workflow runs only on `pull_request` (and pushes to main), so it always
+# executes in the context of the PR's own code with a read-only token and no
+# secrets. It must never be switched to `pull_request_target`: that trigger runs
+# in the base-repo context with secret access, and checking out PR-head code
+# there would let a fork PR run arbitrary lifecycle scripts with those secrets
+# (the "Pwn Request" pattern). Fork PRs from first-time contributors require
+# maintainer approval before this workflow runs at all.
 permissions:
   contents: read
   checks: write
 
 jobs:
+  # Path guard: this repo owns the backend only. A PR that adds or changes
+  # files under a path owned by another repo (e.g. konfirm-frontend/) fails
+  # here, before any build or test runs.
+  path-guard:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
+    steps:
+      - name: Reject changes to paths this repo does not own
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # Paths owned by sibling repos, not by konfirm-backend.
+          FORBIDDEN='^(konfirm-frontend|konfirm-contracts)/'
+          git init -q .
+          git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+          git fetch -q --no-tags --depth=1 origin "$BASE_SHA" "$HEAD_SHA"
+          changed=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+          echo "Changed files:"
+          echo "$changed"
+          offenders=$(echo "$changed" | grep -E "$FORBIDDEN" || true)
+          if [ -n "$offenders" ]; then
+            echo "::error::This PR touches paths konfirm-backend does not own:"
+            echo "$offenders"
+            exit 1
+          fi
+
   test:
     runs-on: ubuntu-latest
 
@@ -46,9 +74,10 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2, verified via GitHub API against the real tag
         with:
-          # For pull_request_target events (fork PRs), checkout the PR's head commit
-          # instead of the base branch. This ensures we test the actual fork code.
-          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.ref }}
+          # Check out the PR's merge commit (pull_request event) or the pushed
+          # commit. Never a fork head under a base-context trigger.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
 
       - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0, verified via GitHub API against the real tag
         with:
@@ -57,6 +86,11 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      # Fails the build if two migration files share a numeric prefix, which
+      # would make a fresh build's apply order differ from production's.
+      - name: Check migration prefixes are unique
+        run: npm run migrate:check
 
       - name: Apply migrations to the test database
         run: npm run migrate:up

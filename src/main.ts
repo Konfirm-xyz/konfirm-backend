@@ -10,13 +10,17 @@ import { AppModule } from './app.module';
 import { initSentry } from './observability/sentry';
 import { installProcessHandlers } from './observability/process-handlers';
 import { resolveTrustProxyHops } from './common/trust-proxy';
-import { assertSeparateHotKeys } from './common/facilitator-signer';
+import { assertKmsFacilitatorIsSeparateAtBoot, assertSeparateHotKeys } from './common/facilitator-signer';
 import { assertNetworkReady } from './common/stellar-network';
 import { buildCorsMiddleware } from './common/cors';
 
 async function bootstrap() {
   // Refuse to start if the facilitator, deployer, and fee keys overlap.
   assertSeparateHotKeys();
+  // Same check for the KMS-backed facilitator, which has no secret in env to
+  // compare — derive its address now so a collision fails at boot, not on the
+  // first settlement.
+  await assertKmsFacilitatorIsSeparateAtBoot();
   assertNetworkReady();
   initSentry();
   // After initSentry so Sentry's own handlers capture first; these add the

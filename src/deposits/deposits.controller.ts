@@ -18,7 +18,12 @@ const transferSchema = z.object({
   from: z.string().regex(/^G[A-Z2-7]{55}$/),
   to: z.string().regex(/^G[A-Z2-7]{55}$/),
   currency: z.enum(['XLM', 'USDC']),
-  amount: nonNegativeDecimalStringSchema('amount', 7, 9_223_372_036_854_775_807n),
+  // amount=0 is unpayable: the Stellar SDK rejects Operation.payment({ amount: "0" })
+  // — same fix applied to createLinkSchema in links.controller.ts (closed #64).
+  amount: nonNegativeDecimalStringSchema('amount', 7, 9_223_372_036_854_775_807n).refine(
+    (value) => Number(value) > 0,
+    'amount must be greater than 0',
+  ),
 });
 
 // No AuthGuard anywhere here — this exists to get test funds into *any*
@@ -56,7 +61,7 @@ export class DepositsController {
     description: 'Testnet-only. Unauthenticated.',
   })
   @ApiBody(zodBody(tokenSchema, 'Signed SEP-10 challenge transaction'))
-  @ApiResponse({ status: 200 | 201, description: 'Anchor JWT token.' })
+  @ApiResponse({ status: 200, description: 'Anchor JWT token.' })
   @ApiResponse({ status: 404, description: 'Faucet not enabled.' })
   token(@Body(new ZodValidationPipe(tokenSchema)) body: z.infer<typeof tokenSchema>) {
     return this.deposits.exchangeToken(body.transaction);
@@ -70,7 +75,7 @@ export class DepositsController {
       'Returns the anchor-hosted interactive URL. Testnet-only. Unauthenticated.',
   })
   @ApiBody(zodBody(startSchema, 'Start deposit request'))
-  @ApiResponse({ status: 200 | 201, description: 'Anchor interactive URL and transaction ID.' })
+  @ApiResponse({ status: 200, description: 'Anchor interactive URL and transaction ID.' })
   @ApiResponse({ status: 404, description: 'Faucet not enabled.' })
   start(@Body(new ZodValidationPipe(startSchema)) body: z.infer<typeof startSchema>) {
     return this.deposits.startDeposit(body.token, body.currency, body.account);
@@ -102,7 +107,7 @@ export class DepositsController {
       'Used by the testnet harness scripts for exercising payments outside the browser. Testnet-only.',
   })
   @ApiBody(zodBody(transferSchema, 'Transfer payment request'))
-  @ApiResponse({ status: 200 | 201, description: 'Unsigned XDR payment transaction.' })
+  @ApiResponse({ status: 200, description: 'Unsigned XDR payment transaction.' })
   @ApiResponse({ status: 404, description: 'Faucet not enabled.' })
   prepareTransfer(@Body(new ZodValidationPipe(transferSchema)) body: z.infer<typeof transferSchema>) {
     return this.deposits.prepareTransferPayment(body.from, body.to, body.currency, body.amount);

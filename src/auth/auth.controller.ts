@@ -1,5 +1,5 @@
-import { BadRequestException, Body, ConflictException, Controller, Delete, Get, HttpCode, Logger, Param, Patch, Post, Req, Res, UseGuards } from '@nestjs/common';
-import { ApiBody, ApiCookieAuth, ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { BadRequestException, Body, ConflictException, Controller, Delete, Get, HttpCode, Logger, Param, Patch, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
+import { ApiBody, ApiCookieAuth, ApiOperation, ApiParam, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
 import { z } from 'zod';
@@ -29,7 +29,7 @@ const emailSchema = z.string().trim().toLowerCase().email();
 const signupSchema = z.object({
   email: emailSchema,
   password: passwordSchema,
-  name: z.string().min(1).max(200),
+  name: z.string().trim().min(1).max(200),
   // Stellar strkey account id — base32, no checksum validation here; a
   // malformed address fails loudly the first time a payout is attempted,
   // which is an acceptable place for that error to surface for a pilot.
@@ -49,6 +49,11 @@ const forgotPasswordSchema = z.object({
   email: emailSchema,
 });
 
+export const changePasswordSchema = z.object({
+  current_password: z.string().min(1, 'current password is required'),
+  new_password: passwordSchema,
+});
+
 const resetPasswordSchema = z.object({
   token: z.string().min(20).max(200),
   password: passwordSchema,
@@ -57,15 +62,26 @@ const resetPasswordSchema = z.object({
 // Tighter limit for flows that send email (same ceiling as forgot-password).
 const EMAIL_CHANGE_THROTTLE = { default: { limit: 5, ttl: 60_000 } };
 
+const changePasswordSchema = z.object({
+  current_password: z.string().min(1),
+  new_password: passwordSchema,
+});
+
 const updateNameSchema = z.object({
   name: z.string().min(1).max(200),
 });
 
 const requestEmailChangeSchema = z.object({
   email: emailSchema,
+  current_password: z.string().min(1, 'Current password is required'),
 });
 
 const confirmEmailChangeSchema = z.object({
+  token: z.string().min(20).max(200),
+});
+
+// Signup email verification token — same shape as the email-change token.
+const confirmEmailSchema = z.object({
   token: z.string().min(20).max(200),
 });
 
@@ -115,6 +131,47 @@ export class AuthController {
     );
     this.setSessionCookie(res, token);
     return { merchant };
+  }
+
+  // Signup email verification: the link in the signup email points here. The
+  // service flips the merchant from 'pending' to 'active' and is idempotent
+  // for an already-active account, so a double-click is harmless.
+  @Post('confirm-email')
+  @HttpCode(200)
+  @Throttle(AUTH_THROTTLE)
+  @ApiOperation({
+    summary: 'Confirm a signup email address',
+    description:
+      'Consumes the one-time token sent at signup and flips the merchant from ' +
+      'pending to active. Rate-limited to 10 req/min per IP.',
+  })
+  @ApiBody(zodBody(confirmEmailSchema, 'Confirm signup email'))
+  @ApiResponse({ status: 200, description: 'Email confirmed; returns { status: "active" }.' })
+  @ApiResponse({ status: 400, description: 'Token invalid, expired, or already used.' })
+  @ApiResponse({ status: 422, description: 'Validation error.' })
+  async confirmEmail(@Body(new ZodValidationPipe(confirmEmailSchema)) body: z.infer<typeof confirmEmailSchema>) {
+    return this.auth.confirmEmail(body.token);
+  }
+
+  // GET variant so the link in the email can be clicked directly. Same
+  // throttle as the POST: the token is single-use, but guessing is still
+  // rate-limited.
+  @Get('confirm-email')
+  @Throttle(AUTH_THROTTLE)
+  @ApiOperation({
+    summary: 'Confirm a signup email address (link target)',
+    description:
+      'Same as POST /auth/confirm-email, for direct clicks on the emailed link. ' +
+      'Rate-limited to 10 req/min per IP.',
+  })
+  @ApiQuery({ name: 'token', required: true, description: 'Verification token from the signup email', type: 'string' })
+  @ApiResponse({ status: 200, description: 'Email confirmed; returns { status: "active" }.' })
+  @ApiResponse({ status: 400, description: 'Token invalid, expired, or already used.' })
+  @ApiResponse({ status: 422, description: 'Validation error.' })
+  async confirmEmailViaLink(@Query('token') token: string) {
+    const parsed = confirmEmailSchema.safeParse({ token });
+    if (!parsed.success) throw new BadRequestException('invalid verification token');
+    return this.auth.confirmEmail(parsed.data.token);
   }
 
   @Post('login')
@@ -192,6 +249,31 @@ export class AuthController {
     await this.auth.logout(req.cookies?.[SESSION_COOKIE]);
     res.clearCookie(SESSION_COOKIE);
     return { ok: true };
+  }
+
+  @Post('change-password')
+  @HttpCode(200)
+  @UseGuards(AuthGuard)
+  @Throttle(AUTH_THROTTLE)
+  @ApiCookieAuth('merchant-session')
+  @ApiOperation({
+    summary: 'Change merchant password (issue #246)',
+    description:
+      'Requires the current password. Bumps session_version to invalidate all other active sessions server-side, ' +
+      'and issues a fresh session cookie for the current session.',
+  })
+  @ApiBody(zodBody(changePasswordSchema, 'Change password request'))
+  @ApiResponse({ status: 200, description: 'Password changed. A new konfirm_session cookie is set.' })
+  @ApiResponse({ status: 400, description: 'Current password is incorrect, or the new password is invalid or unchanged.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated.' })
+  async changePassword(
+    @Req() req: AuthedRequest,
+    @Body(new ZodValidationPipe(changePasswordSchema)) body: z.infer<typeof changePasswordSchema>,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const { token, merchant } = await this.auth.changePassword(req.merchant.id, body.current_password, body.new_password);
+    this.setSessionCookie(res, token);
+    return { ok: true, merchant };
   }
 
   @Get('me')
@@ -385,12 +467,12 @@ export class AuthController {
       'Only meaningful for sessions that were issued via the standard merchant login ' +
       '(no member_id). Member sessions already have a row and receive 409.',
   })
-  @ApiBody(zodBody(z.object({ password: z.string().min(8) }), 'Bootstrap owner'))
+  @ApiBody(zodBody(z.object({ password: passwordSchema }), 'Bootstrap owner'))
   @ApiResponse({ status: 200, description: 'Owner row created or already existed. Returns { ok: true }.' })
   @ApiResponse({ status: 401, description: 'Not authenticated.' })
   @ApiResponse({ status: 409, description: 'A member row for this merchant+email already exists.' })
   async bootstrapOwner(
-    @Body(new ZodValidationPipe(z.object({ password: z.string().min(8).refine((p) => Buffer.byteLength(p, 'utf8') <= 72, 'password must be 72 bytes or fewer') })))
+    @Body(new ZodValidationPipe(z.object({ password: passwordSchema })))
     body: { password: string },
     @Req() req: AuthedRequest,
     @Res({ passthrough: true }) res: Response,
@@ -442,6 +524,7 @@ export class AuthController {
   @ApiOperation({
     summary: 'Request an email address change',
     description:
+      'Requires the current password as re-authentication. ' +
       'Sends a verification link to the requested new email address. ' +
       'The actual swap does not happen until the link is confirmed via POST /auth/me/confirm-email-change. ' +
       'A second request before confirmation replaces the first pending token. ' +
@@ -450,13 +533,13 @@ export class AuthController {
   })
   @ApiBody(zodBody(requestEmailChangeSchema, 'Request email change'))
   @ApiResponse({ status: 200, description: 'Always returns { ok: true }.' })
-  @ApiResponse({ status: 401, description: 'Not authenticated.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated or current_password incorrect.' })
   async requestEmailChange(
     @Body(new ZodValidationPipe(requestEmailChangeSchema)) body: z.infer<typeof requestEmailChangeSchema>,
     @Req() req: AuthedRequest,
   ) {
     try {
-      await this.auth.requestEmailChange(req.merchant.id, body.email);
+      await this.auth.requestEmailChange(req.merchant.id, body.email, body.current_password);
     } catch (err) {
       // Surface validation errors (same-as-current, bad format) but swallow
       // conflict errors to avoid telling the caller whether that address
@@ -525,6 +608,39 @@ export class AuthController {
       req.merchant.id,
       body.current_password,
       body.stellar_base_address,
+    );
+    this.setSessionCookie(res, token);
+    return { merchant };
+  }
+
+  // Self-service rotation for a merchant who can still log in — no reset
+  // email loop. Mirrors the admin-side POST /admin/auth/change-password.
+  @Post('change-password')
+  @HttpCode(200)
+  @UseGuards(AuthGuard)
+  @Throttle(AUTH_THROTTLE)
+  @ApiCookieAuth('merchant-session')
+  @ApiOperation({
+    summary: 'Change own merchant password',
+    description:
+      'Requires the current password. Signs out every other session for this merchant (bumps session_version) and ' +
+      'issues a fresh cookie for this one. Rate-limited to 10 req/min per IP.',
+  })
+  @ApiBody(zodBody(changePasswordSchema, 'Change password request'))
+  @ApiResponse({ status: 200, description: 'Password changed. A new konfirm_session cookie is set.' })
+  @ApiResponse({ status: 400, description: 'Current password is incorrect, or the new password is invalid or unchanged.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated.' })
+  @ApiResponse({ status: 403, description: 'Team member sessions cannot change the owner password.' })
+  async changePassword(
+    @Body(new ZodValidationPipe(changePasswordSchema)) body: z.infer<typeof changePasswordSchema>,
+    @Req() req: AuthedRequest,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const { token, merchant } = await this.auth.changePassword(
+      req.merchant.id,
+      body.current_password,
+      body.new_password,
+      req.merchant.member_id,
     );
     this.setSessionCookie(res, token);
     return { merchant };

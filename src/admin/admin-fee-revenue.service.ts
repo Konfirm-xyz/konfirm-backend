@@ -3,10 +3,10 @@ import { pool } from '../db/pool';
 
 // Fee revenue was already captured on every payment row (payments.fee_usdc)
 // — this is purely a missing aggregation/view, not new backend state. Only
-// counts status = 'paid': a refunded or disputed payment's fee was never
-// actually realized as revenue, so including it would overstate this
-// number for exactly the transactions an admin is most likely to click
-// into and check.
+// counts status = 'paid': a refunded, disputed or on-chain-voided payment's
+// fee was never actually realized as revenue, so including it would
+// overstate this number for exactly the transactions an admin is most
+// likely to click into and check.
 @Injectable()
 export class AdminFeeRevenueService {
   async summary() {

@@ -1,5 +1,7 @@
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { pool } from '../db/pool';
+import { assertLinkPayable } from '../common/payable-link';
+import { isUuid } from '../common/numeric-validation';
 
 @Injectable()
 export class SessionsService {
@@ -7,6 +9,7 @@ export class SessionsService {
   // says "received" and gives that payment's amount and tx hash. It does not
   // expose status or flags, and it never reveals any other payment.
   async statusFor(linkId: string, muxedId: string) {
+    if (!isUuid(linkId)) throw new NotFoundException('session not found');
     const { rows } = await pool.query(
       `SELECT p.amount_usdc, p.asset_code, p.tx_hash, p.created_at
        FROM link_sessions ls
@@ -38,12 +41,18 @@ export class SessionsService {
   // TODO: the §1 design expects screening at this server round trip in the
   // real build; move or duplicate the check here once that design is settled.
   async reserve(linkId: string, muxedId: string) {
+    if (!isUuid(linkId)) throw new NotFoundException('link not found');
     const link = await pool.query(
-      `SELECT id, merchant_id, active FROM links WHERE id = $1`,
+      `SELECT l.id, l.merchant_id, l.active, l.expires_at, m.status AS merchant_status
+       FROM links l JOIN merchants m ON m.id = l.merchant_id
+       WHERE l.id = $1`,
       [linkId],
     );
     if (link.rows.length === 0) throw new NotFoundException('link not found');
-    if (!link.rows[0].active) throw new ConflictException('link is not active');
+    // Same active / expiry / suspended-merchant rules as
+    // PaymentsService.loadPayableLink(), so a session can't be reserved
+    // against a link that could never be paid.
+    assertLinkPayable(link.rows[0]);
 
     const merchantId = link.rows[0].merchant_id;
     try {

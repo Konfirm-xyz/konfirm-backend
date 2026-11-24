@@ -2,7 +2,7 @@ import { BadRequestException, Body, Controller, Get, NotFoundException, Param, P
 import { ApiBody, ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { z } from 'zod';
-import { AdminGuard, AuthedAdminRequest } from '../admin-auth/admin-auth.guard';
+import { AdminGuard, AdminRoles, AuthedAdminRequest } from '../admin-auth/admin-auth.guard';
 import { ZodValidationPipe } from '../zod-validation.pipe';
 import { zodBody } from '../common/zod-to-openapi';
 import { AdminActionsService } from './admin-actions.service';
@@ -54,6 +54,7 @@ function parseSettlementId(raw: string): bigint {
 @ApiTags('admin-treasury-settlements')
 @Controller('admin/treasury/settlements')
 @UseGuards(AdminGuard)
+@AdminRoles('superadmin')
 export class AdminTreasurySettlementsController {
   constructor(
     private readonly settlements: AdminTreasurySettlementsService,
@@ -119,7 +120,7 @@ export class AdminTreasurySettlementsController {
       'returns.',
   })
   @ApiBody(zodBody(proposeSchema, 'Proposer address, merchant address, and amount'))
-  @ApiResponse({ status: 200 | 201, description: '{ build_token, unsigned_xdr, network_passphrase, tx_hash }.' })
+  @ApiResponse({ status: 200, description: '{ build_token, unsigned_xdr, network_passphrase, tx_hash }.' })
   @ApiResponse({ status: 400, description: 'Invalid input or simulation failed.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
   async propose(
@@ -144,7 +145,7 @@ export class AdminTreasurySettlementsController {
   })
   @ApiParam({ name: 'id', description: 'on-chain settlement id', type: 'string' })
   @ApiBody(zodBody(approveSchema, 'Signer address'))
-  @ApiResponse({ status: 200 | 201, description: '{ build_token, unsigned_xdr, network_passphrase, tx_hash }.' })
+  @ApiResponse({ status: 200, description: '{ build_token, unsigned_xdr, network_passphrase, tx_hash }.' })
   @ApiResponse({ status: 400, description: 'Invalid input or simulation failed.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
   async approve(
@@ -169,7 +170,7 @@ export class AdminTreasurySettlementsController {
   })
   @ApiParam({ name: 'id', description: 'on-chain settlement id', type: 'string' })
   @ApiBody(zodBody(executeSchema, 'Caller (signer) address'))
-  @ApiResponse({ status: 200 | 201, description: '{ build_token, unsigned_xdr, network_passphrase, tx_hash }.' })
+  @ApiResponse({ status: 200, description: '{ build_token, unsigned_xdr, network_passphrase, tx_hash }.' })
   @ApiResponse({ status: 400, description: 'Invalid input or simulation failed.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
   async execute(
@@ -193,10 +194,11 @@ export class AdminTreasurySettlementsController {
     description:
       'Verifies the signed XDR hashes to exactly what Konfirm built for this build_token, then submits it and ' +
       'polls for confirmation. Re-syncs the settlement mirror row from chain afterward -- never from anything ' +
-      'the client claims.',
+      'the client claims. If that re-sync fails after the transaction confirmed, the response still reports ' +
+      'success with mirror_sync_pending: true instead of a 500.',
   })
   @ApiBody(zodBody(submitSchema, 'Signed XDR and the build_token returned by propose/approve/execute'))
-  @ApiResponse({ status: 200 | 201, description: 'The freshly-synced settlement record, plus tx_hash.' })
+  @ApiResponse({ status: 200, description: 'The freshly-synced settlement record, plus tx_hash.' })
   @ApiResponse({ status: 400, description: 'Hash mismatch, malformed XDR, or the network rejected it.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
   @ApiResponse({ status: 404, description: 'build_token not found.' })
@@ -205,10 +207,15 @@ export class AdminTreasurySettlementsController {
     @Req() req: AuthedAdminRequest,
   ) {
     const result = await this.settlements.submitSigned(body.signed_xdr, body.build_token);
+    // A confirmed transaction whose mirror re-read failed still counts as a
+    // successful submit -- log it as such, flagging that the mirror needs a
+    // retry, rather than letting the admin see a failed action.
+    const mirrorSyncPending = 'mirror_sync_pending' in result;
     await this.actions.log(req.admin.id, 'treasury_settlement.submit', 'treasury_settlement', result.onchain_settlement_id, {
-      status: result.status,
-      approvals_count: result.approvals_count,
+      status: mirrorSyncPending ? 'submitted' : result.status,
+      approvals_count: mirrorSyncPending ? null : result.approvals_count,
       tx_hash: result.tx_hash,
+      mirror_sync_pending: mirrorSyncPending,
     });
     return result;
   }

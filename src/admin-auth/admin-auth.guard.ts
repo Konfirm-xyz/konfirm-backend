@@ -1,4 +1,4 @@
-import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
+import { CanActivate, ExecutionContext, Injectable, SetMetadata, UnauthorizedException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import type { Request } from 'express';
 import { pool } from '../db/pool';
@@ -18,6 +18,10 @@ const COOKIE_NAME = 'konfirm_admin_session';
 // open to every authenticated admin, preserving existing behaviour.
 export const ADMIN_ROLES_KEY = 'admin_roles';
 
+// The decorator the guard reads. Without it the key above is never set and
+// every authenticated admin — `support` included — passes every route.
+export const AdminRoles = (...roles: AdminRole[]) => SetMetadata(ADMIN_ROLES_KEY, roles);
+
 @Injectable()
 export class AdminGuard implements CanActivate {
   constructor(
@@ -33,9 +37,14 @@ export class AdminGuard implements CanActivate {
 
     // Same session_version check as AuthGuard: logout bumps it, so a token
     // issued before logout stops working server-side, not just client-side.
-    const { rows } = await pool.query('SELECT session_version FROM admins WHERE id = $1', [claims.id]);
+    const { rows } = await pool.query('SELECT session_version, status FROM admins WHERE id = $1', [claims.id]);
     if (!rows[0] || rows[0].session_version !== (claims.sv ?? 0)) {
       throw new UnauthorizedException('session expired or invalid — please log in again');
+    }
+    // Deactivated admins (#249) are rejected here rather than only at login,
+    // so an already-issued cookie stops working at the next request.
+    if (rows[0].status === 'deactivated') {
+      throw new UnauthorizedException('this admin account has been deactivated');
     }
 
     // Strip the internal session version so it never reaches a response body.

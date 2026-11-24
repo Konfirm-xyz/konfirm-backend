@@ -1,9 +1,10 @@
-import { Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { ApiBody, ApiCookieAuth, ApiOperation, ApiParam, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { z } from 'zod';
 import { ZodValidationPipe } from '../zod-validation.pipe';
 import { parsePaginationInt } from '../common/numeric-validation';
-import { AdminGuard, AuthedAdminRequest } from '../admin-auth/admin-auth.guard';
+import { listQuerySchema } from './admin.schemas';
+import { AdminGuard, AdminRoles, AuthedAdminRequest } from '../admin-auth/admin-auth.guard';
 import { AdminMerchantsService } from './admin-merchants.service';
 import { AdminActionsService } from './admin-actions.service';
 import { AdminStatsService } from './admin-stats.service';
@@ -27,6 +28,8 @@ import { AdminTeamService } from './admin-team.service';
 import { FacilitatorSpendGuardService } from '../facilitator/facilitator-spend-guard.service';
 import { AuthService } from '../auth/auth.service';
 import { zodBody } from '../common/zod-to-openapi';
+import { daysQuerySchema, DaysQuery } from './admin.schemas';
+import { ActivityQuery, activityQuerySchema } from './admin.schemas';
 
 const passwordResetSchema = z.object({
   reason: z.string().min(3).max(500),
@@ -48,7 +51,7 @@ const setMerchantFeeBpsSchema = z.object({
 });
 
 const setPaymentStatusSchema = z.object({
-  status: z.enum(['paid', 'held', 'disputed']),
+  status: z.enum(['paid', 'held', 'disputed', 'voided']),
   reason: z.string().max(500).optional(),
 });
 
@@ -64,6 +67,10 @@ const rewindCursorSchema = z.object({
 const setBazaarListingStatusSchema = z.object({
   status: z.enum(['approved', 'rejected']),
   reason: z.string().max(500).optional(),
+});
+
+const setFacilitatorCapSchema = z.object({
+  capUsdc: z.number().finite().nonnegative(),
 });
 
 // Admin-assisted profile override (issue #38). All fields optional so the
@@ -142,13 +149,14 @@ export class AdminController {
   // --- Merchants ---
 
   @Get('merchants')
-  @ApiOperation({ summary: 'List all merchants', description: 'All merchants, newest first. Supports pagination.' })
+  @ApiOperation({ summary: 'List all merchants', description: 'All merchants, newest first. Filter by status, paginate with limit/offset.' })
+  @ApiQuery({ name: 'status', required: false, type: 'string', description: 'Filter by status: pending | active | suspended' })
   @ApiQuery({ name: 'limit', required: false, type: 'number', description: 'Max results (default 50)' })
   @ApiQuery({ name: 'offset', required: false, type: 'number', description: 'Pagination offset' })
   @ApiResponse({ status: 200, description: 'Array of merchant records.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  listMerchants(@Query('limit') limit?: string, @Query('offset') offset?: string) {
-    return this.merchants.list(parsePaginationInt(limit), parsePaginationInt(offset));
+  listMerchants(@Query('status') status?: string, @Query('limit') limit?: string, @Query('offset') offset?: string) {
+    return this.merchants.list(status, parsePaginationInt(limit), parsePaginationInt(offset));
   }
 
   @Post('merchants/:id/password-reset')
@@ -336,14 +344,17 @@ export class AdminController {
   @ApiQuery({ name: 'offset', required: false, type: 'number', description: 'Pagination offset' })
   @ApiResponse({ status: 200, description: 'Array of payment records.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  listPayments(@Query('status') status?: string, @Query('limit') limit?: string, @Query('offset') offset?: string) {
-    return this.payments.list(status, parsePaginationInt(limit), parsePaginationInt(offset));
+  listPayments(
+    @Query('status') status?: string,
+    @Query(new ZodValidationPipe(listQuerySchema)) query: ListQuery = {},
+  ) {
+    return this.payments.list(status, query.limit, query.offset);
   }
 
   @Patch('payments/:id/status')
   @ApiOperation({
     summary: 'Set payment status',
-    description: 'Manually override a payment status (paid/held/disputed). Logged to admin_actions.',
+    description: 'Manually override a payment status (paid/held/disputed/voided). Logged to admin_actions.',
   })
   @ApiParam({ name: 'id', description: 'Payment UUID', type: 'string' })
   @ApiBody(zodBody(setPaymentStatusSchema, 'Set payment status'))
@@ -413,6 +424,7 @@ export class AdminController {
   // --- Compliance ---
 
   @Get('compliance/blocked-addresses')
+  @AdminRoles('superadmin')
   @ApiOperation({ summary: 'List blocked Stellar addresses', description: 'The admin-managed compliance blocklist.' })
   @ApiResponse({ status: 200, description: 'Array of blocked address records.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
@@ -421,6 +433,7 @@ export class AdminController {
   }
 
   @Post('compliance/blocked-addresses')
+  @AdminRoles('superadmin')
   @ApiOperation({
     summary: 'Block a Stellar address',
     description: 'Adds a Stellar address to the blocklist. Logged to admin_actions.',
@@ -440,6 +453,7 @@ export class AdminController {
   }
 
   @Delete('compliance/blocked-addresses/:id')
+  @AdminRoles('superadmin')
   @ApiOperation({
     summary: 'Unblock a Stellar address',
     description: 'Removes a Stellar address from the blocklist. Logged to admin_actions.',
@@ -502,10 +516,12 @@ export class AdminController {
       'Merchant cash-outs Konfirm has observed being started, with the anchor\'s last known status. ' +
       'Admin-visibility only — Konfirm has no authority over the anchor\'s own transaction state.',
   })
+  @ApiQuery({ name: 'limit', required: false, type: 'number' })
+  @ApiQuery({ name: 'offset', required: false, type: 'number' })
   @ApiResponse({ status: 200, description: 'Array of withdrawal attempt records.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  listWithdrawalAttempts() {
-    return this.withdrawalAttempts.list();
+  listWithdrawalAttempts(@Query(new ZodValidationPipe(listQuerySchema)) query: z.infer<typeof listQuerySchema>) {
+    return this.withdrawalAttempts.list(query.limit, query.offset);
   }
 
   // --- x402 settlements ---
@@ -517,20 +533,28 @@ export class AdminController {
   @ApiQuery({ name: 'offset', required: false, type: 'number' })
   @ApiResponse({ status: 200, description: 'Array of x402 settlement records.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  listX402Settlements(@Query('status') status?: string, @Query('limit') limit?: string, @Query('offset') offset?: string) {
-    return this.x402Settlements.list(status, limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
+  listX402Settlements(
+    @Query('status') status?: string,
+    @Query(new ZodValidationPipe(listQuerySchema)) query: ListQuery = {},
+  ) {
+    return this.x402Settlements.list(status, query.limit, query.offset);
   }
 
   // --- Pay links ---
 
   @Get('links')
-  @ApiOperation({ summary: 'List all payment links', description: 'Payment links across every merchant, newest first.' })
+  @ApiOperation({ summary: 'List all payment links', description: 'Payment links across every merchant, newest first. Filter by active.' })
+  @ApiQuery({ name: 'active', required: false, type: 'boolean', description: 'Filter by active flag: true | false' })
   @ApiQuery({ name: 'limit', required: false, type: 'number' })
   @ApiQuery({ name: 'offset', required: false, type: 'number' })
   @ApiResponse({ status: 200, description: 'Array of link records.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  listLinks(@Query('limit') limit?: string, @Query('offset') offset?: string) {
-    return this.links.list(parsePaginationInt(limit), parsePaginationInt(offset));
+  listLinks(@Query('active') active?: string, @Query('limit') limit?: string, @Query('offset') offset?: string) {
+    if (active !== undefined && active !== '' && active !== 'true' && active !== 'false') {
+      throw new BadRequestException('active must be true or false');
+    }
+    const activeFilter = active === 'true' ? true : active === 'false' ? false : undefined;
+    return this.links.list(activeFilter, parsePaginationInt(limit), parsePaginationInt(offset));
   }
 
   // --- Blockchain status ---
@@ -544,6 +568,25 @@ export class AdminController {
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
   getBlockchainStatus() {
     return this.blockchain.status();
+  }
+
+  // backend#191: allowlist every token the backend's own config expects
+  // (USDC, EURC, XLM) on the deployed channel contract, so real
+  // open_channel calls stop failing with TokenNotAllowed after a fresh
+  // deploy + initialize. Idempotent — re-running it is harmless.
+  @Post('blockchain/channel/allowlist-tokens')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Allowlist channel tokens',
+    description:
+      'Calls set_token_allowed(true) on the deployed channel contract for every token in the backend config ' +
+      '(USDC, EURC, XLM). Requires STELLAR_DEPLOYER_SECRET_KEY (the contract admin). Run once after a fresh ' +
+      'deploy + initialize; safe to re-run.',
+  })
+  @ApiResponse({ status: 200, description: 'Per-token result with transaction hash or error reason.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
+  allowlistChannelTokens() {
+    return this.blockchain.allowlistChannelTokens();
   }
 
   // --- Notifications ---
@@ -564,6 +607,7 @@ export class AdminController {
   // --- Treasury ---
 
   @Get('treasury/status')
+  @AdminRoles('superadmin')
   @ApiOperation({ summary: 'Get treasury contract state', description: 'Treasury contract state and balances.' })
   @ApiResponse({ status: 200, description: 'Treasury status object.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
@@ -586,8 +630,8 @@ export class AdminController {
   @ApiQuery({ name: 'days', required: false, type: 'number', description: 'Number of days (default 30)' })
   @ApiResponse({ status: 200, description: 'Array of { date, amount } objects.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  getFeeRevenueDaily(@Query('days') days?: string) {
-    return this.feeRevenue.daily(days ? Number(days) : undefined);
+  getFeeRevenueDaily(@Query(new ZodValidationPipe(daysQuerySchema)) query: DaysQuery) {
+    return this.feeRevenue.daily(query.days);
   }
 
   // --- Users ---
@@ -603,8 +647,8 @@ export class AdminController {
   @ApiQuery({ name: 'offset', required: false, type: 'number' })
   @ApiResponse({ status: 200, description: 'Array of payer address summaries.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  listUsers(@Query('limit') limit?: string, @Query('offset') offset?: string) {
-    return this.users.list(limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
+  listUsers(@Query(new ZodValidationPipe(listQuerySchema)) query: ListQuery = {}) {
+    return this.users.list(query.limit, query.offset);
   }
 
   // --- Wallets ---
@@ -620,8 +664,8 @@ export class AdminController {
   @ApiQuery({ name: 'offset', required: false, type: 'number' })
   @ApiResponse({ status: 200, description: 'Array of wallet role objects.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  listWallets(@Query('limit') limit?: string, @Query('offset') offset?: string) {
-    return this.wallets.list(limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
+  listWallets(@Query(new ZodValidationPipe(listQuerySchema)) query: ListQuery = {}) {
+    return this.wallets.list(query.limit, query.offset);
   }
 
   // --- Exchange rate ---
@@ -639,8 +683,8 @@ export class AdminController {
   @ApiQuery({ name: 'limit', required: false, type: 'number' })
   @ApiResponse({ status: 200, description: 'Array of conversion records.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  listExchangeRateConversions(@Query('limit') limit?: string) {
-    return this.exchangeRate.recentConversions(limit ? Number(limit) : undefined);
+  listExchangeRateConversions(@Query(new ZodValidationPipe(listQuerySchema)) query: ListQuery = {}) {
+    return this.exchangeRate.recentConversions(query.limit);
   }
 
   // --- Referrals ---
@@ -651,8 +695,8 @@ export class AdminController {
   @ApiQuery({ name: 'offset', required: false, type: 'number' })
   @ApiResponse({ status: 200, description: 'Array of referral records.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  listReferrals(@Query('limit') limit?: string, @Query('offset') offset?: string) {
-    return this.referrals.list(limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
+  listReferrals(@Query(new ZodValidationPipe(listQuerySchema)) query: ListQuery = {}) {
+    return this.referrals.list(query.limit, query.offset);
   }
 
   // --- Bazaar listings ---
@@ -695,6 +739,7 @@ export class AdminController {
   // (a compromised but still-legitimate signing process, not a leaked key).
 
   @Get('facilitator/status')
+  @AdminRoles('superadmin')
   @ApiOperation({
     summary: 'Facilitator spend-guard status',
     description: 'Returns today\'s facilitator spend against the cap, and whether signing is currently halted.',
@@ -706,6 +751,7 @@ export class AdminController {
   }
 
   @Post('facilitator/resume')
+  @AdminRoles('superadmin')
   @ApiOperation({
     summary: 'Resume facilitator signing after a halt',
     description:
@@ -719,18 +765,56 @@ export class AdminController {
     return { ok: true };
   }
 
+  @Patch('facilitator/cap')
+  @ApiOperation({
+    summary: 'Set the facilitator daily spend cap',
+    description:
+      'Persists a DB-backed daily cap override (USDC) so the cap can be tuned without an env-var change and redeploy. Logged to admin_actions.',
+  })
+  @ApiBody(zodBody(setFacilitatorCapSchema, 'Set facilitator daily cap'))
+  @ApiResponse({ status: 200, description: 'Returns { ok: true, capUsdc }.' })
+  @ApiResponse({ status: 400, description: 'capUsdc missing, non-numeric or negative.' })
+  @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
+  async setFacilitatorCap(
+    @Body(new ZodValidationPipe(setFacilitatorCapSchema)) body: z.infer<typeof setFacilitatorCapSchema>,
+    @Req() req: AuthedAdminRequest,
+  ) {
+    await this.facilitatorSpendGuard.setDailyCap(body.capUsdc);
+    await this.actions.log(req.admin.id, 'facilitator.set_cap', 'facilitator', 'spend-guard', {
+      capUsdc: body.capUsdc,
+    });
+    return { ok: true, capUsdc: body.capUsdc };
+  }
+
   // Surfaced back to the admin UI as a recent-activity feed rather than
   // just written and forgotten — an audit log nobody reads back isn't
   // accountability, it's a checkbox.
   @Get('activity')
   @ApiOperation({
     summary: 'Recent admin actions',
-    description: 'Audit trail of admin mutations: who, what, on what, when, plus free-text reason. Newest first.',
+    description: 'Audit trail of admin mutations: who, what, on what, when, plus free-text reason. Supports filtering by admin, action, target, date range, and pagination. Newest first.',
   })
-  @ApiQuery({ name: 'limit', required: false, type: 'number', description: 'Max records to return (default 50)' })
+  @ApiQuery({ name: 'limit', required: false, type: 'number', description: 'Max records to return (default 20, max 100)' })
+  @ApiQuery({ name: 'offset', required: false, type: 'number', description: 'Records to skip for pagination' })
+  @ApiQuery({ name: 'admin_id', required: false, type: 'string', description: 'Filter by acting admin UUID' })
+  @ApiQuery({ name: 'action', required: false, type: 'string', description: 'Filter by action name (e.g. facilitator.pause)' })
+  @ApiQuery({ name: 'target_type', required: false, type: 'string', description: 'Filter by target type (e.g. merchant, facilitator)' })
+  @ApiQuery({ name: 'target_id', required: false, type: 'string', description: 'Filter by target identifier' })
+  @ApiQuery({ name: 'from', required: false, type: 'string', description: 'ISO start date/time filter' })
+  @ApiQuery({ name: 'to', required: false, type: 'string', description: 'ISO end date/time filter' })
   @ApiResponse({ status: 200, description: 'Array of admin action records.' })
+  @ApiResponse({ status: 400, description: 'Invalid query parameters.' })
   @ApiResponse({ status: 401, description: 'Not authenticated as admin.' })
-  recentActivity(@Query('limit') limit?: string) {
-    return this.actions.recent(limit ? Number(limit) : undefined);
+  recentActivity(@Query(new ZodValidationPipe(activityQuerySchema)) query: ActivityQuery) {
+    return this.actions.recent({
+      limit: query.limit,
+      offset: query.offset,
+      admin_id: query.admin_id,
+      action: query.action,
+      target_type: query.target_type,
+      target_id: query.target_id,
+      from: query.from,
+      to: query.to,
+    });
   }
 }

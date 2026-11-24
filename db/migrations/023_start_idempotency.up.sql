@@ -1,3 +1,5 @@
+-- 023_start_idempotency.up.sql
+--
 -- Inbound idempotency for POST /withdrawals/start and /deposits/start.
 -- AnchorClient.startInteractive is deliberately never retried by Konfirm's
 -- own HTTP client, but a client-side retry (timeout, double-tap, two tabs)

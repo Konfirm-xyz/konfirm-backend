@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Logger, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { ApiBody, ApiCookieAuth, ApiOperation, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { z } from 'zod';
@@ -29,6 +29,8 @@ const prepareSchema = z.object({
 @ApiCookieAuth('merchant-session')
 @Throttle({ default: { limit: 20, ttl: 60_000 } })
 export class WithdrawalsController {
+  private readonly logger = new Logger(WithdrawalsController.name);
+
   constructor(private readonly withdrawals: WithdrawalsService) {}
 
   // Every endpoint that acts on the merchant's account goes through this, so
@@ -61,7 +63,7 @@ export class WithdrawalsController {
     description: 'Submits the merchant-signed SEP-10 challenge to the anchor and returns a short-lived JWT for the subsequent SEP-24 flow.',
   })
   @ApiBody(zodBody(tokenSchema, 'Signed SEP-10 challenge transaction'))
-  @ApiResponse({ status: 200 | 201, description: 'Anchor JWT token.' })
+  @ApiResponse({ status: 200, description: 'Anchor JWT token.' })
   @ApiResponse({ status: 400, description: 'Invalid or malformed challenge transaction.' })
   @ApiResponse({ status: 401, description: 'Not authenticated.' })
   token(@Body(new ZodValidationPipe(tokenSchema)) body: z.infer<typeof tokenSchema>) {
@@ -77,7 +79,7 @@ export class WithdrawalsController {
       '(a tracking-insert failure never blocks the cash-out).',
   })
   @ApiBody(zodBody(startSchema, 'Start withdrawal request'))
-  @ApiResponse({ status: 200 | 201, description: 'Anchor interactive URL and transaction ID.' })
+  @ApiResponse({ status: 200, description: 'Anchor interactive URL and transaction ID.' })
   @ApiResponse({ status: 400, description: 'Invalid token or no Stellar address on file.' })
   @ApiResponse({ status: 401, description: 'Not authenticated.' })
   async start(@Body(new ZodValidationPipe(startSchema)) body: z.infer<typeof startSchema>, @Req() req: AuthedRequest) {
@@ -92,8 +94,7 @@ export class WithdrawalsController {
         [req.merchant.id, body.currency, result.id, body.token],
       );
     } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn('[withdrawals] could not record admin-visibility tracking row', err);
+      this.logger.warn('could not record admin-visibility tracking row', err);
     }
     return result;
   }
@@ -127,7 +128,7 @@ export class WithdrawalsController {
       "from the merchant's account to the anchor. The merchant signs this in Freighter and submits it.",
   })
   @ApiBody(zodBody(prepareSchema, 'Prepare withdrawal payment request'))
-  @ApiResponse({ status: 200 | 201, description: 'Unsigned XDR payment transaction.' })
+  @ApiResponse({ status: 200, description: 'Unsigned XDR payment transaction.' })
   @ApiResponse({ status: 400, description: 'Anchor not yet ready or invalid parameters.' })
   @ApiResponse({ status: 401, description: 'Not authenticated.' })
   async preparePayment(

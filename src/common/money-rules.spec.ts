@@ -1,5 +1,5 @@
 import * as vectors from '../../money-rules/vectors.json';
-import { feeStroops, fromStroops, owedFee, toStroops } from './money-rules';
+import { feeStroops, fromStroops, owedFee, platformFeeFloor, toStroops } from './money-rules';
 
 describe('money rules (shared golden vectors)', () => {
   it.each(vectors.vectors.map((v) => [v.name, v] as const))('%s', (_name, v) => {
@@ -44,5 +44,20 @@ describe('toStroops / fromStroops sign handling', () => {
   it('formats the zero and one-stroop boundaries', () => {
     expect(fromStroops(0n)).toBe('0.0000000');
     expect(fromStroops(1n)).toBe('0.0000001');
+  });
+});
+
+describe('platformFeeFloor', () => {
+  it('returns "0" when PLATFORM_FEE_FLOOR is unset', () => {
+    expect(platformFeeFloor({})).toBe('0');
+  });
+
+  it('returns the configured value as-is (string passthrough, no parsing)', () => {
+    expect(platformFeeFloor({ PLATFORM_FEE_FLOOR: '0.05' })).toBe('0.05');
+    expect(platformFeeFloor({ PLATFORM_FEE_FLOOR: '1' })).toBe('1');
+  });
+
+  it('returns "0" when PLATFORM_FEE_FLOOR is an empty string', () => {
+    expect(platformFeeFloor({ PLATFORM_FEE_FLOOR: '' })).toBe('0');
   });
 });

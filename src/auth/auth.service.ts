@@ -3,6 +3,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import * as bcrypt from 'bcryptjs';
 import * as jwt from 'jsonwebtoken';
 import { pool } from '../db/pool';
+import { MIN_REFERRAL_QUALIFYING_AMOUNT_USDC } from '../referrals/referral-rewards.service';
 import { assertDistinctSecrets, resolveSessionSecret } from '../common/secrets';
 import { merchantLoginAttempts } from '../common/login-attempts';
 import { MAILER, Mailer } from '../mail/mailer';
@@ -87,6 +88,7 @@ export class AuthService {
     referralCode?: string,
   ): Promise<{ token: string; merchant: MerchantClaims; status: string }> {
     email = normalizeEmail(email);
+    name = name.trim();
     const existing = await pool.query('SELECT id FROM merchants WHERE email = $1', [email]);
     if (existing.rows.length > 0) {
       throw new ConflictException('an account with this email already exists');
@@ -340,6 +342,46 @@ export class AuthService {
     this.logger.log(`password reset completed for merchant ${merchantId}`);
   }
 
+  // Self-service password rotation for an authenticated merchant. Requires current
+  // password. Bumps session_version to invalidate all other active sessions server-side,
+  // and issues a fresh JWT with the incremented session_version.
+  async changePassword(merchantId: string, currentPassword: string, newPassword: string): Promise<{ token: string; merchant: MerchantClaims }> {
+    const { rows } = await pool.query(
+      'SELECT id, email, name, stellar_base_address, password_hash, status, session_version FROM merchants WHERE id = $1',
+      [merchantId],
+    );
+    if (rows.length === 0) {
+      throw new UnauthorizedException('session expired or invalid — please log in again');
+    }
+    const row = rows[0];
+    if (row.status === 'suspended') {
+      throw new ForbiddenException('this account has been suspended — contact support');
+    }
+    const ok = await bcrypt.compare(currentPassword, row.password_hash);
+    if (!ok) {
+      throw new BadRequestException('current password is incorrect');
+    }
+    if (await bcrypt.compare(newPassword, row.password_hash)) {
+      throw new BadRequestException('new password must be different from the current one');
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+    const updated = await pool.query(
+      'UPDATE merchants SET password_hash = $2, session_version = session_version + 1, updated_at = NOW() WHERE id = $1 RETURNING session_version',
+      [merchantId, passwordHash],
+    );
+    const newSessionVersion = updated.rows[0].session_version;
+
+    const merchant: MerchantClaims = {
+      id: row.id,
+      email: row.email,
+      name: row.name,
+      stellar_base_address: row.stellar_base_address,
+    };
+    this.logger.log(`password changed for merchant ${merchantId} (session_version bumped to ${newSessionVersion})`);
+    return { token: this.issueToken(merchant, newSessionVersion), merchant };
+  }
+
   // Bumps session_version the same way a password reset does, so the token
   // being logged out (and any copy of it) stops passing AuthGuard. A missing
   // or already-invalid token has nothing to revoke, so it's a no-op.
@@ -394,12 +436,12 @@ export class AuthService {
 
     const { rows: referrals } = await pool.query(
       `SELECT m.name, m.email, r.created_at,
-              EXISTS(SELECT 1 FROM payments p WHERE p.merchant_id = r.referred_id AND p.status = 'paid') AS activated
+              EXISTS(SELECT 1 FROM payments p WHERE p.merchant_id = r.referred_id AND p.status = 'paid' AND p.amount_usdc >= $2) AS activated
        FROM referrals r
        JOIN merchants m ON m.id = r.referred_id
        WHERE r.referrer_id = $1
        ORDER BY r.created_at DESC`,
-      [merchantId],
+      [merchantId, MIN_REFERRAL_QUALIFYING_AMOUNT_USDC],
     );
 
     return {
@@ -449,8 +491,24 @@ export class AuthService {
   //
   // A new request while a pending one is open replaces it via
   // DELETE+INSERT so only one live token exists per merchant at a time.
-  async requestEmailChange(merchantId: string, newEmail: string): Promise<void> {
+  async requestEmailChange(
+    merchantId: string,
+    newEmail: string,
+    currentPassword: string,
+  ): Promise<void> {
     newEmail = normalizeEmail(newEmail);
+
+    // Re-authenticate: email changes are security-critical and require the current password.
+    const { rows: merchantRows } = await pool.query(
+      'SELECT email, password_hash FROM merchants WHERE id = $1',
+      [merchantId],
+    );
+    if (merchantRows.length === 0) throw new NotFoundException('merchant not found');
+
+    const ok = await bcrypt.compare(currentPassword, merchantRows[0].password_hash);
+    if (!ok) {
+      throw new UnauthorizedException('current password is incorrect');
+    }
 
     // Reject if the new address is already taken by another merchant.
     const { rows: conflict } = await pool.query(
@@ -462,9 +520,7 @@ export class AuthService {
     }
 
     // Reject if the new address is the same as the current one.
-    const { rows: current } = await pool.query('SELECT email FROM merchants WHERE id = $1', [merchantId]);
-    if (current.length === 0) throw new NotFoundException('merchant not found');
-    if (current[0].email === newEmail) {
+    if (merchantRows[0].email === newEmail) {
       throw new BadRequestException('new email must differ from the current email');
     }
 
@@ -529,6 +585,10 @@ export class AuthService {
       );
     }
 
+    // Fetch previous email before updating so we can alert the original address.
+    const { rows: prevRows } = await pool.query('SELECT email FROM merchants WHERE id = $1', [merchantId]);
+    const previousEmail = prevRows[0]?.email;
+
     const { rows } = await pool.query(
       `UPDATE merchants
        SET email = $2, session_version = session_version + 1, updated_at = NOW()
@@ -545,6 +605,26 @@ export class AuthService {
       stellar_base_address: row.stellar_base_address,
     };
     this.logger.log(`email changed for merchant ${merchantId} → ${newEmail}`);
+
+    // Notify the old email address (best-effort) so the owner is alerted if their account was hijacked.
+    if (previousEmail && previousEmail !== newEmail) {
+      await this.mailer
+        .send({
+          to: previousEmail,
+          subject: 'Security Alert: Your Konfirm account email address was changed',
+          text:
+            `Your Konfirm account email address was just changed to ${newEmail}.\n\n` +
+            `If you requested this change, you can safely disregard this message.\n\n` +
+            `If you did NOT authorize this change, someone may have compromised your session. ` +
+            `Please contact Konfirm support immediately to secure your account.`,
+        })
+        .catch((err) => {
+          this.logger.warn(
+            `failed to send email change notification to previous address ${previousEmail}: ${err?.message}`,
+          );
+        });
+    }
+
     return { token: this.issueToken(merchant, row.session_version), merchant };
   }
 
@@ -583,6 +663,55 @@ export class AuthService {
     };
     this.logger.log(`stellar_base_address updated for merchant ${merchantId}`);
     return { token: this.issueToken(merchant, row.session_version), merchant };
+  }
+
+  // Self-service rotation for a merchant who is already logged in — no reset
+  // email needed. Bumps session_version like resetPassword() does, so every
+  // other session (including one an attacker may hold) stops working; the
+  // caller gets a fresh token for the session that made the change. Only the
+  // owner's own password lives in `merchants`; team-member sessions
+  // (member_id) have their own credentials and are rejected here.
+  async changePassword(
+    merchantId: string,
+    currentPassword: string,
+    newPassword: string,
+    memberId?: string,
+  ): Promise<{ token: string; merchant: MerchantClaims }> {
+    if (memberId) {
+      throw new ForbiddenException('team member passwords are managed by the account owner');
+    }
+    const { rows } = await pool.query(
+      'SELECT id, email, name, stellar_base_address, password_hash, session_version FROM merchants WHERE id = $1',
+      [merchantId],
+    );
+    if (rows.length === 0) throw new NotFoundException('merchant not found');
+    const row = rows[0];
+
+    // 400 rather than 401: the session is fine, only the confirmation is
+    // wrong, and a 401 would read to a client as "you've been logged out".
+    if (!(await bcrypt.compare(currentPassword, row.password_hash))) {
+      throw new BadRequestException('current password is incorrect');
+    }
+    if (await bcrypt.compare(newPassword, row.password_hash)) {
+      throw new BadRequestException('new password must be different from the current one');
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+    const { rows: updated } = await pool.query(
+      `UPDATE merchants SET password_hash = $2, session_version = session_version + 1, updated_at = NOW()
+       WHERE id = $1
+       RETURNING session_version`,
+      [merchantId, passwordHash],
+    );
+
+    const merchant: MerchantClaims = {
+      id: row.id,
+      email: row.email,
+      name: row.name,
+      stellar_base_address: row.stellar_base_address,
+    };
+    this.logger.log(`password changed for merchant ${merchantId}`);
+    return { token: this.issueToken(merchant, updated[0].session_version), merchant };
   }
 
   verifyToken(token: string): MerchantClaims {

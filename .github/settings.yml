@@ -2,8 +2,48 @@
 # (https://github.com/apps/settings) when it is installed on this repo.
 # Without the app this file is documentation only: an admin must apply the
 # same values in Settings, or with the `gh api` command in the PR that added it.
+#
+# STATUS: NOT APPLIED. As of #271 the live repo still reports
+# `has_wiki: true` and `delete_branch_on_merge: false`, i.e. the opposite of
+# the values below, so #119 and #120 are still open. Do not treat this file as
+# evidence that they are fixed. To apply it, an org admin must either install
+# the Settings App on this repo, or run once:
+#
+#   gh api -X PATCH repos/Konfirm-xyz/konfirm-backend \
+#     -F has_wiki=false -F delete_branch_on_merge=true
+#
+# then verify with:
+#
+#   gh api repos/Konfirm-xyz/konfirm-backend \
+#     --jq '{has_wiki, delete_branch_on_merge}'
+#
+# Expected: {"has_wiki": false, "delete_branch_on_merge": true}
 repository:
   # #119: the wiki was never initialized; all docs live in-repo.
   has_wiki: false
   # #120: delete merged feature branches automatically.
   delete_branch_on_merge: true
+  # #283: require every action in .github/workflows to be pinned to a
+  # full-length commit SHA, so a mutable tag can't be re-introduced.
+  # Equivalent API call: gh api -X PUT repos/Konfirm-xyz/konfirm-backend/actions/permissions
+  #   -f sha_pinning_required=true
+  sha_pinning_required: true
+
+# #268: branch protection on main. `enforce_admins` must stay true so admins
+# cannot push or merge past the required review and the `test` check. There is
+# no bypass list: every actor, admins included, goes through the same gate.
+branches:
+  - name: main
+    protection:
+      required_pull_request_reviews:
+        required_approving_review_count: 1
+        dismiss_stale_reviews: true
+      required_status_checks:
+        strict: true
+        contexts:
+          - test
+      enforce_admins: true
+      required_linear_history: false
+      allow_force_pushes: false
+      allow_deletions: false
+      restrictions: null

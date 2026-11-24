@@ -34,6 +34,15 @@ export interface BuiltTx {
   tx_hash: string;
 }
 
+// Returned by submitSigned() when the transaction confirmed on-chain but
+// the mirror row could not be re-read from chain (transient RPC failure).
+// The action succeeded; only the local mirror is stale.
+export interface SubmittedSettlement {
+  onchain_settlement_id: string;
+  tx_hash: string;
+  mirror_sync_pending: true;
+}
+
 type BuildKind = 'propose' | 'approve' | 'execute';
 
 // Mirrors fees.service.ts's SETTLEMENT_TTL_SECONDS -- long enough for an
@@ -226,7 +235,10 @@ export class AdminTreasurySettlementsService {
   // signer's own treasury call instead of a merchant's fee payment.
   // Always re-syncs the mirror row from chain afterward (registerOrResync),
   // never from anything the client claims.
-  async submitSigned(signedXdr: string, buildToken: string): Promise<SettlementRow & { tx_hash: string }> {
+  async submitSigned(
+    signedXdr: string,
+    buildToken: string,
+  ): Promise<(SettlementRow & { tx_hash: string }) | SubmittedSettlement> {
     const { rows } = await pool.query(
       `SELECT id, kind, onchain_settlement_id, tx_hash, status, expires_at
        FROM treasury_settlement_builds WHERE id = $1`,
@@ -274,8 +286,21 @@ export class AdminTreasurySettlementsService {
     // return value; approve/execute already knew theirs at build time.
     const onchainSettlementId =
       build.onchain_settlement_id !== null ? BigInt(build.onchain_settlement_id) : (confirmed.returnValue as bigint);
-    const row = await this.registerOrResync(onchainSettlementId);
-    return { ...row, tx_hash: build.tx_hash };
+    // The transaction is already confirmed on-chain at this point, so a
+    // transient read failure while mirroring it must not surface as a
+    // failed treasury action -- the admin would retry a call that already
+    // landed. Report success with mirror_sync_pending so the UI knows to
+    // re-sync (registerOrResync) rather than re-submit.
+    try {
+      const row = await this.registerOrResync(onchainSettlementId);
+      return { ...row, tx_hash: build.tx_hash };
+    } catch {
+      return {
+        onchain_settlement_id: onchainSettlementId.toString(),
+        tx_hash: build.tx_hash,
+        mirror_sync_pending: true,
+      };
+    }
   }
 
   private async markBuildFailed(buildToken: string, detail: string): Promise<void> {

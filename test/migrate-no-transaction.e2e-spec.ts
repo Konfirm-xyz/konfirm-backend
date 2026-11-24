@@ -1,5 +1,5 @@
 import { Pool } from 'pg';
-import { applyMigrationSql, isNonTransactional } from '../db/migrate';
+import { applyMigrationSql, isNonTransactional, runUp } from '../db/migrate';
 
 // Regression for CREATE INDEX CONCURRENTLY: Postgres rejects it inside a
 // transaction block, so it only works through the runner's `-- no-transaction`
@@ -43,5 +43,37 @@ describe('migration runner non-transactional path (e2e)', () => {
     );
     const tracked = await db.query(`SELECT name FROM ${tracking} WHERE name = '998_probe'`);
     expect(tracked.rowCount).toBe(0);
+  });
+});
+
+// Regression for the silent-drift bug class: an already-applied migration file
+// whose content changed must make `up` fail loudly instead of being ignored.
+describe('migration runner checksum guard (e2e)', () => {
+  const db = new Pool({ connectionString: process.env.DATABASE_URL });
+  const table = 'migrate_checksum_probe';
+
+  beforeAll(async () => {
+    await db.query(`DROP TABLE IF EXISTS ${table}`);
+    await db.query('DROP TABLE IF EXISTS schema_migrations');
+  });
+
+  afterAll(async () => {
+    await db.query(`DROP TABLE IF EXISTS ${table}`);
+    await db.query('DROP TABLE IF EXISTS schema_migrations');
+    await db.end();
+  });
+
+  it('records a checksum and rejects an edited already-applied migration', async () => {
+    await runUp();
+    const applied = await db.query(`SELECT checksum FROM schema_migrations WHERE name = '001_merchants'`);
+    expect(applied.rows[0].checksum).toMatch(/^[0-9a-f]{64}$/);
+
+    // Simulate the file having been edited after it was applied.
+    await db.query(`UPDATE schema_migrations SET checksum = $1 WHERE name = '001_merchants'`, ['0'.repeat(64)]);
+
+    await expect(runUp()).rejects.toThrow(/checksum mismatch/);
+    // Nothing new was applied.
+    const count = await db.query('SELECT COUNT(*)::int AS n FROM schema_migrations');
+    expect(count.rows[0].n).toBe(1);
   });
 });

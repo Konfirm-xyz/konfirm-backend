@@ -2,6 +2,8 @@ import { BadRequestException, Controller, Get, Query, Req, UseGuards } from '@ne
 import { ApiCookieAuth, ApiOperation, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { AuthedRequest, AuthGuard } from '../auth/auth.guard';
+import { listQuerySchema, ListQuery } from '../admin/admin.schemas';
+import { ZodValidationPipe } from '../zod-validation.pipe';
 import { nonNegativeIntegerStringSchema, POSTGRES_BIGINT_MAX } from '../common/numeric-validation';
 import { PaymentsService } from './payments.service';
 
@@ -93,10 +95,13 @@ export class PaymentsController {
       'Returns payments newest-first with `status` and `flag_reason`. ' +
       'Held payments are listed but only `paid` counts toward totals.',
   })
+  @ApiQuery({ name: 'limit', required: false, type: 'number', description: 'Max results (default 25, max 100)' })
+  @ApiQuery({ name: 'offset', required: false, type: 'number', description: 'Pagination offset (default 0)' })
   @ApiResponse({ status: 200, description: 'Array of payment records.' })
+  @ApiResponse({ status: 400, description: 'Invalid limit or offset.' })
   @ApiResponse({ status: 401, description: 'Not authenticated.' })
-  listMine(@Req() req: AuthedRequest) {
-    return this.payments.listForMerchant(req.merchant.id);
+  listMine(@Req() req: AuthedRequest, @Query(new ZodValidationPipe(listQuerySchema)) query: ListQuery) {
+    return this.payments.listForMerchant(req.merchant.id, query.limit ?? 25, query.offset ?? 0);
   }
 
   @Get('mine/pending')

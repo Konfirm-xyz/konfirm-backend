@@ -5,7 +5,7 @@
 
 ## Where we are
 
-- `STELLAR_NETWORK=mainnet` is supported by the code. The backend loads every identifier it depends on from the environment, and refuses to boot until they're all set (`src/common/stellar-network.ts`, `missingForNetwork`).
+- `STELLAR_NETWORK=mainnet` is supported by the code. The backend loads every identifier it depends on from the environment, and refuses to boot until they're all set (`src/common/stellar-network.ts`, `missingForNetwork`). It also refuses to boot when a set value is not a syntactically valid Stellar strkey of the expected type (`invalidStrkeysForNetwork`): `USDC_ISSUER`, `EURC_ISSUER`, `DEPLOYER_ADDRESS`, `FACILITATOR_ADDRESS` and `COMPLIANCE_CANARY_ADDRESS` must be `G...` account keys; `USDC_SAC_ID`, `X402_USDC_ADDRESS` and the four `*_CONTRACT_ID` values must be `C...` contract IDs. This applies to testnet overrides too. Shape validity is not liveness: before deploy, confirm each contract ID exists on the target network (e.g. `stellar contract info interface --id <C...> --network <testnet|mainnet>`) and that the SAC reports the expected asset.
 - The reconciler reads the same issuer and contract variables.
 - **Mainnet has never been run.** There are no mainnet contracts, no mainnet issuer values in this repo, and no test against mainnet. Setting the variables makes the process start, which is not the same as the system working.
 
