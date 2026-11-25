@@ -66,6 +66,15 @@ export class AdminBlockchainService {
       checkComplianceCanary(),
     ]);
 
+    const reasons: Array<[string, PromiseSettledResult<unknown>]> = [
+      ['facilitator account read', facilitatorResult],
+      ['RPC ping', rpcResult],
+      ['compliance canary', complianceCanary],
+    ];
+    for (const [label, r] of reasons) {
+      if (r.status === 'rejected') {
+        const msg = r.reason instanceof Error ? r.reason.message : String(r.reason);
+        this.logger.warn(`blockchain status: ${label} failed: ${msg}`);
     // backend#328: surface chain-read failures in logs, not only as flipped booleans.
     const reads = { 'facilitator account': facilitatorResult, 'RPC ping': rpcResult, 'compliance canary': complianceCanary };
     for (const [label, result] of Object.entries(reads)) {

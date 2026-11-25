@@ -42,6 +42,12 @@ describe('ReconcilerWatchdogService', () => {
   });
 
   it('flags a cursor that has not moved, while merchants are active', async () => {
+    // Own fixture: an active, Stellar-linked merchant, so the stalled path is
+    // always exercised instead of depending on whatever the DB holds.
+    const { rows } = await pool.query(
+      `INSERT INTO merchants (name, email, password_hash, status, stellar_base_address)
+       VALUES ('Watchdog Fixture', $1, 'test', 'active', $2) RETURNING id`,
+      [fixtureEmail, 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN7'],
     // Own the active-merchant fixture so the stalled branch is always
     // exercised, instead of depending on whatever the test DB holds.
     const { rows } = await pool.query(

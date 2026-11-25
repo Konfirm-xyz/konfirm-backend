@@ -80,6 +80,7 @@ export class AdminTreasuryService {
     } catch (err) {
       reachable = false;
       clientPromise = null;
+      this.logger.warn(`could not read treasury USDC balance: ${err instanceof Error ? err.message : String(err)}`);
       this.logger.warn(`could not read treasury USDC balance: ${(err as Error)?.message ?? err}`);
     }
 

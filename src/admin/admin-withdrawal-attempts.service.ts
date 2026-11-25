@@ -56,6 +56,7 @@ export class AdminWithdrawalAttemptsService {
     } catch (err) {
       // A stale/expired anchor token or a transient anchor error must never
       // break the whole list — this row just keeps its last known status.
+      this.logger.warn(`could not refresh withdrawal attempt ${row.id} status: ${err instanceof Error ? err.message : String(err)}`);
       this.logger.warn(`could not refresh withdrawal attempt ${row.id} status: ${(err as Error)?.message ?? err}`);
       return row;
     }

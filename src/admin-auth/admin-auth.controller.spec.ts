@@ -3,6 +3,20 @@ import { AdminAuthController } from './admin-auth.controller';
 import { AdminAuthService } from './admin-auth.service';
 import { ADMIN_SESSION_COOKIE, AuthedAdminRequest } from './admin-auth.guard';
 
+// Unit test: the controller's request/response wiring, service mocked out.
+describe('AdminAuthController (unit)', () => {
+  const admin = { id: 'a1', email: 'a@example.com', name: 'A', role: 'superadmin' };
+  const originalEnv = process.env.NODE_ENV;
+  let service: { login: jest.Mock; logout: jest.Mock; changePassword: jest.Mock };
+  let res: { cookie: jest.Mock; clearCookie: jest.Mock };
+  let controller: AdminAuthController;
+
+  const expectedCookie = (secure: boolean) => ({
+    httpOnly: true,
+    sameSite: 'strict',
+    secure,
+    maxAge: 12 * 60 * 60 * 1000,
+  });
 // Unit-level: AdminAuthService is stubbed so only the controller's own
 // request/response wiring (cookie attributes, return shapes) is tested (backend#329).
 describe('AdminAuthController', () => {
@@ -18,6 +32,8 @@ describe('AdminAuthController', () => {
       logout: jest.fn().mockResolvedValue(undefined),
       changePassword: jest.fn().mockResolvedValue({ token: 'tok2', admin }),
     };
+    res = { cookie: jest.fn(), clearCookie: jest.fn() };
+    controller = new AdminAuthController(service as unknown as AdminAuthService);
     controller = new AdminAuthController(service as unknown as AdminAuthService);
     res = { cookie: jest.fn(), clearCookie: jest.fn() };
   });
@@ -25,6 +41,7 @@ describe('AdminAuthController', () => {
     process.env.NODE_ENV = originalEnv;
   });
 
+  it('login sets a strict, httpOnly session cookie and returns the admin', async () => {
   const expectedCookie = (secure: boolean) => ({
     httpOnly: true,
     sameSite: 'strict',
@@ -54,6 +71,7 @@ describe('AdminAuthController', () => {
     expect(out).toEqual({ ok: true });
   });
 
+  it('me returns req.admin', () => {
   it('me returns the admin the guard attached', () => {
     expect(controller.me({ admin } as unknown as AuthedAdminRequest)).toEqual({ admin });
   });
@@ -66,6 +84,7 @@ describe('AdminAuthController', () => {
       { current_password: 'old', new_password: 'new-password' },
       res as unknown as Response,
     );
+    expect(service.changePassword).toHaveBeenCalledWith('a1', 'old', 'new-password');
     expect(service.changePassword).toHaveBeenCalledWith('admin-1', 'old', 'new-password');
     expect(res.cookie).toHaveBeenCalledWith(ADMIN_SESSION_COOKIE, 'tok2', expectedCookie(false));
     expect(out).toEqual({ admin });
