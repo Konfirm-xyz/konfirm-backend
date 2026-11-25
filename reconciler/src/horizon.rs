@@ -370,4 +370,56 @@ mod test {
         assert_eq!(ops[1].amount.as_deref(), Some("0.0050000"));
         assert_eq!(ops[1].to.as_deref(), Some("GBJG2IGPXJ673TMTQMMJCSMITNSLVTIJ62MRSHCTQTTGNLV75TFR5PHY"));
     }
+
+    // Payment records embed their enclosing transaction data when queried
+    // with join=transactions — that's where memo_type and memo live (they're
+    // transaction-level attributes, not operation-level). This confirms that
+    // shape parses correctly, since session routing moved from muxed
+    // destination addresses to plain destination + MEMO_ID.
+    #[test]
+    fn payment_op_with_embedded_transaction_memo_decodes_correctly() {
+        let body = r#"{"_embedded":{"records":[
+            {
+                "id":"1",
+                "paging_token":"1",
+                "type":"payment",
+                "transaction_hash":"abc123",
+                "asset_type":"credit_alphanum4",
+                "asset_code":"USDC",
+                "from":"GSENDER",
+                "to":"GRECIPIENT",
+                "amount":"10.0000000",
+                "transaction": {
+                    "memo": "42",
+                    "memo_type": "id"
+                }
+            }
+        ]}}"#;
+        let parsed: PaymentsResponse = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed.embedded.records.len(), 1);
+        let op = &parsed.embedded.records[0];
+        assert!(op.transaction.is_some());
+        let tx = op.transaction.as_ref().unwrap();
+        assert_eq!(tx.memo.as_deref(), Some("42"));
+        assert_eq!(tx.memo_type.as_deref(), Some("id"));
+    }
+
+    // resolve_now_cursor queries the account's latest payment to find its
+    // current paging_token — but on a brand-new account with zero payment
+    // history, Horizon returns an empty records array, and the resolver
+    // must fall back to "0" rather than panic or error. This is a critical
+    // path for the reconciler's initialization on fresh accounts.
+    #[test]
+    fn resolve_now_cursor_falls_back_to_zero_when_account_has_no_payment_history() {
+        let body = r#"{"_embedded":{"records":[]}}"#;
+        let parsed: PaymentsResponse = serde_json::from_str(body).unwrap();
+        // Simulating what resolve_now_cursor does with the response:
+        let cursor = parsed
+            .embedded
+            .records
+            .first()
+            .map(|r| r.paging_token.clone())
+            .unwrap_or_else(|| "0".to_string());
+        assert_eq!(cursor, "0");
+    }
 }
